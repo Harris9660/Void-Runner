@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Dodging Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: black;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="game"></canvas>
+
+    <script>
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // ===== WORLD =====
+        const START_POSITION = { x: 1000, y: 1000 };
+        const BULLET_LIFETIME = 60 * 12; // ~12 seconds at 60 FPS
+        const ASSUMED_FPS = 60;
+        const LEVEL_DURATION = 20; // seconds
+        const LEVEL_DURATION_FRAMES = LEVEL_DURATION * ASSUMED_FPS;
+        const LEVEL_TRANSITION_FRAMES = 90; // ~1.5s at 60 FPS
+        const SHOP_DURATION_FRAMES = 15 * ASSUMED_FPS;
+        const LASER_WARNING_TIME = 70;
+        const LASER_FLASH_TIME = 8;
+        const PREDICTIVE_LASER_BURST_COUNT = 5;
+        const PREDICTIVE_LASER_GAP_FRAMES = 18; // ~0.3s at 60 FPS
+        const PLAYER_HISTORY_FRAMES = ASSUMED_FPS;
+        const FLARE_LIFE = 60;
+        const RADAR_REVEAL_FRAMES = 45;
+        const DASH_COOLDOWN_START = 240;
+        const DASH_COOLDOWN_STEP = 30;
+        const DASH_COOLDOWN_MIN = 45;
+        const SHIELD_COOLDOWN_START = 420;
+        const SHIELD_COOLDOWN_STEP = 60;
+        const SHIELD_COOLDOWN_MIN = 90;
+        const SHIELD_DURATION_START = 60; // 0.1s at 60 FPS
+        const SHIELD_DURATION_STEP = 60;
+        const SHIELD_DURATION_MAX = 300;
+        const FLARE_COOLDOWN_START = 300;
+        const FLARE_COOLDOWN_STEP = 35;
+        const FLARE_COOLDOWN_MIN = 70;
+        const RADAR_COOLDOWN_START = 240;
+        const RADAR_COOLDOWN_STEP = 30;
+        const RADAR_COOLDOWN_MIN = 50;
+        const SPEED_UPGRADE_AMOUNT = 0.4;
+        const DASH_DISTANCE_START = 50;
+        const DASH_DISTANCE_STEP = 12;
+        const FLARE_RADIAL_SHOTS_STEP = 4;
+        const RADAR_SPAWN_MARGIN_STEP = 60;
+        const RADAR_REVEAL_STEP = 18;
+        const PLAYER_MAX_HP = 3;
+        const PLAYER_HIT_INVULNERABILITY_FRAMES = 36;
+        const SHOP_HEAL_AMOUNT = 0.5;
+        const LASER_SHIELD_DAMAGE = 5;
+        const CLOSE_DODGE_RADIUS = 14;
+        const CLOSE_DODGE_BONUS = 0.1;
+        const SCORE_MULTIPLIER_VALUE = 2;
+        const SCORE_MULTIPLIER_DURATION_FRAMES = 3 * ASSUMED_FPS;
+        const CHECKPOINT_INTERVAL = 5;
+        const BOSS_LEVEL_INTERVAL = 10;
+        const BOSS_BACKGROUND_SPAWN_FACTOR = 5;
+        const TESTING_LEVEL_MAX = 100;
+        const TESTING_TIER_MAX = TESTING_LEVEL_MAX;
+        const TESTING_SPEED_UP_MAX = 12;
+        const GAME_MODES = {
+            CLASSIC: "classic",
+            CHECKPOINT: "checkpoint",
+            TESTING: "testing"
+        };
+        const HIGH_SCORE_COOKIE_NAME = "space_traverse_high_score";
+
+        // ===== CAMERA =====
+        const camera = { x: 0, y: 0, shake: 0 };
+
+        // ===== INPUT =====
+        const keys = {};
+        const mouse = { x: 0, y: 0 };
+
+        window.addEventListener("keydown", e => keys[e.key] = true);
+        window.addEventListener("keyup", e => keys[e.key] = false);
+        window.addEventListener("mousemove", e => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        });
+
+        // ===== PLAYER =====
+        let player, projectiles, flares, lasers, boss, playerHistory, straightSpawnTimer, spiralSpawnTimer, laserSpawnTimer, trackingSpawnTimer, trackingBarrageSpawnTimer, laserBarrageSpawnTimer, predictiveLaserSpawnTimer, levelFrameCounter, currentLevel, levelTransitionTimer, shopActive, shopTimer, scoreMultiplierTimer, gameOver, score, highScore, selectedGameMode, modeSelectActive, testingSetupActive, checkpointData, testingConfig, testingFieldIndex;
+
+        function getCookie(name) {
+            const prefix = name + "=";
+            const parts = document.cookie ? document.cookie.split(";") : [];
+
+            for (const part of parts) {
+                const trimmed = part.trim();
+                if (trimmed.startsWith(prefix)) {
+                    return decodeURIComponent(trimmed.slice(prefix.length));
+                }
+            }
+
+            return "";
+        }
+
+        function setCookie(name, value, days = 3650) {
+            const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+            document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+        }
+
+        function loadHighScore() {
+            const savedScore = Number.parseFloat(getCookie(HIGH_SCORE_COOKIE_NAME));
+            return Number.isFinite(savedScore) ? savedScore : 0;
+        }
+
+        function getModeLabel(mode = selectedGameMode) {
+            if (mode === GAME_MODES.TESTING) return "Testing";
+            if (mode === GAME_MODES.CHECKPOINT) return "Checkpoint";
+            if (mode === GAME_MODES.CLASSIC) return "Classic";
+            return "Unselected";
+        }
+
+        function createDefaultTestingConfig() {
+            return {
+                startLevel: 1,
+                dashTier: 0,
+                shieldTier: 0,
+                flareTier: 0,
+                radarTier: 0,
+                speedUps: 0
+            };
+        }
+
+        function getTestingPlayerProgress(config = testingConfig) {
+            return {
+                baseSpeed: 4 + config.speedUps * SPEED_UPGRADE_AMOUNT,
+                dashTier: config.dashTier,
+                shieldTier: config.shieldTier,
+                flareTier: config.flareTier,
+                radarTier: config.radarTier
+            };
+        }
+
+        function getTestingFields() {
+            return [
+                { key: "startLevel", label: "Start Level", min: 1, max: TESTING_LEVEL_MAX },
+                { key: "dashTier", label: "Dash Tier", min: 0, max: TESTING_TIER_MAX },
+                { key: "shieldTier", label: "Shield Tier", min: 0, max: TESTING_TIER_MAX },
+                { key: "flareTier", label: "Flare Tier", min: 0, max: TESTING_TIER_MAX },
+                { key: "radarTier", label: "Radar Tier", min: 0, max: TESTING_TIER_MAX },
+                { key: "speedUps", label: "Speed Ups", min: 0, max: TESTING_SPEED_UP_MAX }
+            ];
+        }
+
+        function createPlayer(progress = {}) {
+            player = {
+                x: START_POSITION.x,
+                y: START_POSITION.y,
+                size: 15,
+                maxHp: PLAYER_MAX_HP,
+                hp: PLAYER_MAX_HP,
+                hitInvulnerability: 0,
+                baseSpeed: progress.baseSpeed ?? 4,
+                speed: progress.baseSpeed ?? 4,
+                dashCooldown: 0,
+                shieldTime: 0,
+                shieldCooldown: 0,
+                flareCooldown: 0,
+                dashTier: progress.dashTier ?? 0,
+                shieldTier: progress.shieldTier ?? 0,
+                flareTier: progress.flareTier ?? 0,
+                radarTier: progress.radarTier ?? 0,
+                dashCooldownMax: Infinity,
+                dashDistance: 0,
+                shieldCooldownMax: Infinity,
+                shieldDurationFrames: 0,
+                shieldMaxHp: 0,
+                shieldHp: 0,
+                shieldCooldownPending: false,
+                flareCooldownMax: Infinity,
+                flareRadialShots: 0,
+                radarCooldownMax: Infinity,
+                radarPulseTimer: 0,
+                radarRevealTimer: 0,
+                radarRevealFrames: 0,
+                radarSpawnMargin: 50
+            };
+        }
+
+        function getPlayerProgress() {
+            return {
+                baseSpeed: player.baseSpeed,
+                dashTier: player.dashTier,
+                shieldTier: player.shieldTier,
+                flareTier: player.flareTier,
+                radarTier: player.radarTier
+            };
+        }
+
+        function resetGame(startLevel = 1, startingScore = 0, playerProgress = {}) {
+            createPlayer(playerProgress);
+
+            projectiles = [];
+            flares = [];
+            lasers = [];
+            boss = null;
+            playerHistory = [];
+            straightSpawnTimer = 0;
+            spiralSpawnTimer = 0;
+            laserSpawnTimer = 0;
+            trackingSpawnTimer = 0;
+            trackingBarrageSpawnTimer = 0;
+            laserBarrageSpawnTimer = 0;
+            predictiveLaserSpawnTimer = 0;
+            levelFrameCounter = 0;
+            currentLevel = startLevel;
+            levelTransitionTimer = LEVEL_TRANSITION_FRAMES;
+            shopActive = false;
+            shopTimer = 0;
+            scoreMultiplierTimer = 0;
+            gameOver = false;
+            score = startingScore;
+            camera.x = player.x - canvas.width / 2;
+            camera.y = player.y - canvas.height / 2;
+            camera.shake = 0;
+            updateAbilityStats();
+            syncBossForLevel();
+        }
+
+        function shouldSaveCheckpoint(level) {
+            return level === 1 || (level - 1) % CHECKPOINT_INTERVAL === 0;
+        }
+
+        function saveCheckpoint() {
+            if (selectedGameMode !== GAME_MODES.CHECKPOINT) return;
+
+            checkpointData = {
+                level: currentLevel,
+                score,
+                playerProgress: getPlayerProgress()
+            };
+        }
+
+        function startNewRun(mode) {
+            selectedGameMode = mode;
+            modeSelectActive = false;
+            testingSetupActive = false;
+            checkpointData = null;
+            resetGame();
+
+            if (selectedGameMode === GAME_MODES.CHECKPOINT) {
+                saveCheckpoint();
+            }
+        }
+
+        function openTestingSetup() {
+            selectedGameMode = GAME_MODES.TESTING;
+            modeSelectActive = false;
+            testingSetupActive = true;
+            checkpointData = null;
+            testingConfig = createDefaultTestingConfig();
+            testingFieldIndex = 0;
+        }
+
+        function startTestingRun() {
+            selectedGameMode = GAME_MODES.TESTING;
+            modeSelectActive = false;
+            testingSetupActive = false;
+            checkpointData = null;
+            resetGame(testingConfig.startLevel, 0, getTestingPlayerProgress());
+        }
+
+        function restartRun() {
+            if (selectedGameMode === GAME_MODES.TESTING) {
+                resetGame(testingConfig.startLevel, 0, getTestingPlayerProgress());
+                return;
+            }
+
+            if (selectedGameMode === GAME_MODES.CHECKPOINT && checkpointData) {
+                resetGame(checkpointData.level, checkpointData.score, checkpointData.playerProgress);
+                return;
+            }
+
+            resetGame();
+        }
+
+        function returnToModeSelect() {
+            selectedGameMode = null;
+            modeSelectActive = true;
+            testingSetupActive = false;
+            checkpointData = null;
+            resetGame();
+        }
+
+        highScore = loadHighScore();
+        selectedGameMode = null;
+        modeSelectActive = true;
+        testingSetupActive = false;
+        checkpointData = null;
+        testingConfig = createDefaultTestingConfig();
+        testingFieldIndex = 0;
+        resetGame();
+
+        // ===== UTILS =====
+        function aim(x, y, tx, ty, speed) {
+            const dx = tx - x;
+            const dy = ty - y;
+            const len = Math.hypot(dx, dy);
+            if (len === 0) return { vx: 0, vy: 0 };
+            return { vx: (dx / len) * speed, vy: (dy / len) * speed };
+        }
+
+        function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+
+            const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+            const closestX = x1 + t * dx;
+            const closestY = y1 + t * dy;
+            return Math.hypot(px - closestX, py - closestY);
+        }
+
+        function getScoreMultiplier() {
+            return scoreMultiplierTimer > 0 ? SCORE_MULTIPLIER_VALUE : 1;
+        }
+
+        function formatHp(value) {
+            return Number.isInteger(value) ? String(value) : value.toFixed(1);
+        }
+
+        function addScore(basePoints) {
+            score += basePoints * getScoreMultiplier();
+            if (selectedGameMode !== GAME_MODES.TESTING && score > highScore) {
+                highScore = score;
+                setCookie(HIGH_SCORE_COOKIE_NAME, highScore.toFixed(2));
+            }
+        }
+
+        function triggerCloseDodge() {
+            scoreMultiplierTimer = SCORE_MULTIPLIER_DURATION_FRAMES;
+            addScore(CLOSE_DODGE_BONUS);
+        }
+
+        function damagePlayer(amount = 1) {
+            if (gameOver || player.hitInvulnerability > 0) return false;
+
+            player.hp = Math.max(0, player.hp - amount);
+            player.hitInvulnerability = PLAYER_HIT_INVULNERABILITY_FRAMES;
+            camera.shake = Math.max(camera.shake, 20);
+            if (player.hp <= 0) {
+                gameOver = true;
+            }
+            return true;
+        }
+
+        function isBossLevel(level = currentLevel) {
+            return level > 0 && level % BOSS_LEVEL_INTERVAL === 0;
+        }
+
+        function createBossForLevel(level) {
+            const tier = Math.floor(level / BOSS_LEVEL_INTERVAL);
+            const maxHp = 8 + tier * 4;
+
+            return {
+                x: player.x + 260,
+                y: player.y - 180,
+                size: 46 + tier * 4,
+                hp: maxHp,
+                maxHp,
+                angle: Math.random() * Math.PI * 2,
+                orbitRadius: 240 + tier * 16,
+                orbitSpeed: 0.008 + tier * 0.0008,
+                missileCooldown: 90,
+                burstCooldown: 150,
+                flashTimer: 0
+            };
+        }
+
+        function syncBossForLevel() {
+            boss = isBossLevel(currentLevel) ? createBossForLevel(currentLevel) : null;
+        }
+
+        // ===== SPAWN SYSTEM =====
+
+        function spawnProjectile(x, y, type = "basic") {
+            let speed = type === "fast" ? 4 : 2;
+            let { vx, vy } = aim(x, y, player.x, player.y, speed);
+
+            projectiles.push({
+                x, y, vx, vy,
+                size: type === "fast" ? 8 : 10,
+                type,
+                trail: [],
+                life: BULLET_LIFETIME,
+                dodgeTriggered: false
+            });
+        }
+
+        // PATTERNS
+        function spawnRing(cx, cy) {
+            for (let i = 0; i < 12; i++) {
+                let angle = (Math.PI * 2 / 12) * i;
+                projectiles.push({
+                    x: cx,
+                    y: cy,
+                    vx: Math.cos(angle) * 2,
+                    vy: Math.sin(angle) * 2,
+                    size: 10,
+                    type: "ring",
+                    trail: [],
+                    life: BULLET_LIFETIME,
+                    dodgeTriggered: false
+                });
+            }
+        }
+
+        function spawnSpiral(cx, cy) {
+            for (let i = 0; i < 8; i++) {
+                let angle = (Date.now() / 200 + i) % (Math.PI * 2);
+                projectiles.push({
+                    x: cx,
+                    y: cy,
+                    vx: Math.cos(angle) * 2,
+                    vy: Math.sin(angle) * 2,
+                    size: 10,
+                    type: "spiral",
+                    trail: [],
+                    life: BULLET_LIFETIME,
+                    dodgeTriggered: false
+                });
+            }
+        }
+
+        function spawnTrackingProjectile(x, y) {
+            return spawnTrackingProjectileWithStats(x, y, {
+                speed: 2.4,
+                size: 11,
+                turnRate: 0.055,
+                type: "tracking"
+            });
+        }
+
+        function spawnTrackingProjectileWithStats(x, y, stats) {
+            const speed = stats.speed;
+            const { vx, vy } = aim(x, y, player.x, player.y, speed);
+            const projectile = {
+                x, y, vx, vy,
+                size: stats.size,
+                type: stats.type,
+                trail: [],
+                life: BULLET_LIFETIME,
+                speed,
+                turnRate: stats.turnRate,
+                dodgeTriggered: false
+            };
+
+            projectiles.push(projectile);
+            return projectile;
+        }
+
+        function isTrackingProjectile(projectile) {
+            return projectile.type === "tracking" || projectile.type === "tracking-fast" || projectile.type === "boss-tracking";
+        }
+
+        function spawnTrackingBarrage() {
+            const count = 5;
+            for (let i = 0; i < count; i++) {
+                const origin = getSpawnOutsideView();
+                spawnTrackingProjectileWithStats(origin.x, origin.y, {
+                    speed: 3.6,
+                    size: 9,
+                    turnRate: 0.02,
+                    type: "tracking-fast"
+                });
+            }
+        }
+
+        function getSpawnOutsideView() {
+            const margin = player && player.radarTier > 0 ? player.radarSpawnMargin : 50;
+
+            const left = camera.x;
+            const right = camera.x + canvas.width;
+            const top = camera.y;
+            const bottom = camera.y + canvas.height;
+
+            const side = Math.floor(Math.random() * 4);
+
+            let x, y;
+
+            if (side === 0) { // LEFT
+                x = left - margin;
+                y = top + Math.random() * canvas.height;
+            }
+            else if (side === 1) { // RIGHT
+                x = right + margin;
+                y = top + Math.random() * canvas.height;
+            }
+            else if (side === 2) { // TOP
+                x = left + Math.random() * canvas.width;
+                y = top - margin;
+            }
+            else { // BOTTOM
+                x = left + Math.random() * canvas.width;
+                y = bottom + margin;
+            }
+
+            return { x, y };
+        }
+
+        function spawnLaserWarning() {
+            const origin = getSpawnOutsideView();
+            const jitter = 180;
+            const targetX = player.x + (Math.random() - 0.5) * jitter;
+            const targetY = player.y + (Math.random() - 0.5) * jitter;
+
+            const dx = targetX - origin.x;
+            const dy = targetY - origin.y;
+            const len = Math.hypot(dx, dy) || 1;
+            const dirX = dx / len;
+            const dirY = dy / len;
+            const beamLength = Math.hypot(canvas.width, canvas.height) * 2;
+
+            lasers.push({
+                x1: origin.x,
+                y1: origin.y,
+                x2: origin.x + dirX * beamLength,
+                y2: origin.y + dirY * beamLength,
+                width: 28,
+                warning: LASER_WARNING_TIME,
+                flash: 0,
+                fired: false
+            });
+        }
+
+        function spawnLaserBarrage() {
+            const laserCount = 3 + Math.floor(Math.random() * 3);
+            const distance = Math.max(canvas.width, canvas.height) * 0.9;
+            const beamLength = Math.hypot(canvas.width, canvas.height) * 2;
+            const baseAngle = Math.random() * Math.PI * 2;
+
+            for (let i = 0; i < laserCount; i++) {
+                const angle = baseAngle + (Math.PI * 2 * i) / laserCount;
+                const originX = player.x + Math.cos(angle) * distance;
+                const originY = player.y + Math.sin(angle) * distance;
+                const targetX = player.x + (Math.random() - 0.5) * 80;
+                const targetY = player.y + (Math.random() - 0.5) * 80;
+                const dx = targetX - originX;
+                const dy = targetY - originY;
+                const len = Math.hypot(dx, dy) || 1;
+
+                lasers.push({
+                    x1: originX,
+                    y1: originY,
+                    x2: originX + (dx / len) * beamLength,
+                    y2: originY + (dy / len) * beamLength,
+                    width: 24,
+                    warning: LASER_WARNING_TIME,
+                    flash: 0,
+                    fired: false
+                });
+            }
+        }
+
+        function recordPlayerHistory() {
+            playerHistory.push({ x: player.x, y: player.y });
+            if (playerHistory.length > PLAYER_HISTORY_FRAMES) {
+                playerHistory.shift();
+            }
+        }
+
+        function getPredictedPlayerPosition(framesAhead) {
+            if (playerHistory.length < 2) {
+                return { x: player.x, y: player.y };
+            }
+
+            const oldest = playerHistory[0];
+            const newest = playerHistory[playerHistory.length - 1];
+            const samples = Math.max(1, playerHistory.length - 1);
+            const vxPerFrame = (newest.x - oldest.x) / samples;
+            const vyPerFrame = (newest.y - oldest.y) / samples;
+
+            return {
+                x: player.x + vxPerFrame * framesAhead,
+                y: player.y + vyPerFrame * framesAhead
+            };
+        }
+
+        function spawnPredictiveLaserBurst() {
+            const distance = Math.max(canvas.width, canvas.height) * 1.05;
+            const beamLength = Math.hypot(canvas.width, canvas.height) * 2;
+            const baseAngle = Math.random() * Math.PI * 2;
+
+            for (let i = 0; i < PREDICTIVE_LASER_BURST_COUNT; i++) {
+                const shotDelay = LASER_WARNING_TIME + i * PREDICTIVE_LASER_GAP_FRAMES;
+                const predicted = getPredictedPlayerPosition(shotDelay);
+                const angle = baseAngle + i * (Math.PI / 7);
+                const originX = predicted.x + Math.cos(angle) * distance;
+                const originY = predicted.y + Math.sin(angle) * distance;
+                const targetX = predicted.x;
+                const targetY = predicted.y;
+                const dx = targetX - originX;
+                const dy = targetY - originY;
+                const len = Math.hypot(dx, dy) || 1;
+
+                lasers.push({
+                    x1: originX,
+                    y1: originY,
+                    x2: originX + (dx / len) * beamLength,
+                    y2: originY + (dy / len) * beamLength,
+                    width: 22,
+                    warning: shotDelay,
+                    flash: 0,
+                    fired: false,
+                    type: "predictive"
+                });
+            }
+        }
+
+        function spawnBossMissileVolley() {
+            if (!boss) return;
+
+            const missileCount = 3 + Math.floor(Math.random() * 2);
+            for (let i = 0; i < missileCount; i++) {
+                const angle = boss.angle + ((i - (missileCount - 1) / 2) * 0.4);
+                const originX = boss.x + Math.cos(angle) * (boss.size + 10);
+                const originY = boss.y + Math.sin(angle) * (boss.size + 10);
+                const missile = spawnTrackingProjectileWithStats(originX, originY, {
+                    speed: 3.2,
+                    size: 10,
+                    turnRate: 0.028,
+                    type: "boss-tracking"
+                });
+
+                missile.owner = "boss";
+                missile.bossDamage = 1;
+                missile.bossSafeFrames = 42;
+            }
+        }
+
+        function spawnBossBurst() {
+            if (!boss) return;
+
+            const count = 12;
+            for (let i = 0; i < count; i++) {
+                const angle = boss.angle + (Math.PI * 2 * i) / count;
+                projectiles.push({
+                    x: boss.x,
+                    y: boss.y,
+                    vx: Math.cos(angle) * 2.8,
+                    vy: Math.sin(angle) * 2.8,
+                    size: 8,
+                    type: "boss-burst",
+                    trail: [],
+                    life: Math.floor(BULLET_LIFETIME * 0.7),
+                    dodgeTriggered: false
+                });
+            }
+        }
+
+        function fireFlares() {
+            const worldMouseX = mouse.x + camera.x;
+            const worldMouseY = mouse.y + camera.y;
+            const baseAngle = Math.atan2(worldMouseY - player.y, worldMouseX - player.x);
+            const spread = [-0.22, 0, 0.22];
+
+            for (const offset of spread) {
+                const angle = baseAngle + offset;
+                flares.push({
+                    x: player.x,
+                    y: player.y,
+                    vx: Math.cos(angle) * 10,
+                    vy: Math.sin(angle) * 10,
+                    size: 6,
+                    life: FLARE_LIFE
+                });
+            }
+
+            for (let i = 0; i < player.flareRadialShots; i++) {
+                const angle = (Math.PI * 2 * i) / player.flareRadialShots;
+                flares.push({
+                    x: player.x,
+                    y: player.y,
+                    vx: Math.cos(angle) * 10,
+                    vy: Math.sin(angle) * 10,
+                    size: 6,
+                    life: FLARE_LIFE
+                });
+            }
+        }
+
+        function getCurrentLevel() {
+            return currentLevel;
+        }
+
+        function getSecondsToNextLevel() {
+            const framesIntoLevel = levelFrameCounter % LEVEL_DURATION_FRAMES;
+            const framesRemaining = LEVEL_DURATION_FRAMES - framesIntoLevel;
+            return Math.max(1, Math.ceil(framesRemaining / ASSUMED_FPS));
+        }
+
+        function getAttackIntervals(level) {
+            const intervals = {
+                straight: Math.max(14, 55 - (level - 1) * 4),
+                spiral: Math.max(40, 180 - (level - 2) * 14),
+                laser: Math.max(90, 210 - (level - 3) * 12),
+                tracking: Math.max(45, 230 - (level - 5) * 14),
+                trackingBarrage: Math.max(130, 430 - (level - 10) * 10),
+                laserBarrage: Math.max(200, 520 - (level - 20) * 10),
+                predictiveLaserBurst: Math.max(260, 760 - (level - 30) * 10)
+            };
+
+            if (isBossLevel(level)) {
+                for (const key of Object.keys(intervals)) {
+                    intervals[key] = Math.floor(intervals[key] * BOSS_BACKGROUND_SPAWN_FACTOR);
+                }
+            }
+
+            return intervals;
+        }
+
+        function cooldownFromTier(tier, start, step, min) {
+            return Math.max(min, start - (Math.max(0, tier - 1) * step));
+        }
+
+        function getCooldownCapTier(start, step, min) {
+            return 1 + Math.ceil((start - min) / step);
+        }
+
+        function getOverflowUpgradeTiers(tier, start, step, min) {
+            return Math.max(0, tier - getCooldownCapTier(start, step, min));
+        }
+
+        function formatCooldown(frames) {
+            return (frames / ASSUMED_FPS).toFixed(1) + "s";
+        }
+
+        function updateAbilityStats() {
+            const dashOverflow = getOverflowUpgradeTiers(player.dashTier, DASH_COOLDOWN_START, DASH_COOLDOWN_STEP, DASH_COOLDOWN_MIN);
+            const flareOverflow = getOverflowUpgradeTiers(player.flareTier, FLARE_COOLDOWN_START, FLARE_COOLDOWN_STEP, FLARE_COOLDOWN_MIN);
+            const radarOverflow = getOverflowUpgradeTiers(player.radarTier, RADAR_COOLDOWN_START, RADAR_COOLDOWN_STEP, RADAR_COOLDOWN_MIN);
+
+            player.speed = player.baseSpeed;
+            player.dashCooldownMax = player.dashTier > 0
+                ? cooldownFromTier(player.dashTier, DASH_COOLDOWN_START, DASH_COOLDOWN_STEP, DASH_COOLDOWN_MIN)
+                : Infinity;
+            player.dashDistance = player.dashTier > 0
+                ? DASH_DISTANCE_START + dashOverflow * DASH_DISTANCE_STEP
+                : 0;
+            player.shieldCooldownMax = player.shieldTier > 0
+                ? cooldownFromTier(player.shieldTier, SHIELD_COOLDOWN_START, SHIELD_COOLDOWN_STEP, SHIELD_COOLDOWN_MIN)
+                : Infinity;
+            player.shieldDurationFrames = player.shieldTier > 0
+                ? Math.min(SHIELD_DURATION_MAX, SHIELD_DURATION_START + (player.shieldTier - 1) * SHIELD_DURATION_STEP)
+                : 0;
+            player.shieldMaxHp = player.shieldTier > 0
+                ? 1 + Math.floor(Math.max(0, player.shieldTier - 1) / 2)
+                : 0;
+            player.flareCooldownMax = player.flareTier > 0
+                ? cooldownFromTier(player.flareTier, FLARE_COOLDOWN_START, FLARE_COOLDOWN_STEP, FLARE_COOLDOWN_MIN)
+                : Infinity;
+            player.flareRadialShots = player.flareTier > 0
+                ? flareOverflow * FLARE_RADIAL_SHOTS_STEP
+                : 0;
+            player.radarCooldownMax = player.radarTier > 0
+                ? cooldownFromTier(player.radarTier, RADAR_COOLDOWN_START, RADAR_COOLDOWN_STEP, RADAR_COOLDOWN_MIN)
+                : Infinity;
+            player.radarRevealFrames = player.radarTier > 0
+                ? RADAR_REVEAL_FRAMES + radarOverflow * RADAR_REVEAL_STEP
+                : 0;
+            player.radarSpawnMargin = 50 + player.radarTier * RADAR_SPAWN_MARGIN_STEP;
+        }
+
+        function resolveShieldExpiration() {
+            if (player.shieldTime > 0) return;
+
+            player.shieldHp = 0;
+            if (player.shieldCooldownPending) {
+                player.shieldCooldownPending = false;
+                player.shieldCooldown = player.shieldCooldownMax;
+            }
+        }
+
+        function beginShopPhase() {
+            shopActive = true;
+            shopTimer = SHOP_DURATION_FRAMES;
+            boss = null;
+            projectiles = [];
+            lasers = [];
+            flares = [];
+            scoreMultiplierTimer = 0;
+            player.shieldTime = 0;
+            player.shieldHp = 0;
+        }
+
+        function beginNextLevel() {
+            shopActive = false;
+            currentLevel++;
+            levelFrameCounter = 0;
+            levelTransitionTimer = LEVEL_TRANSITION_FRAMES;
+            projectiles = [];
+            lasers = [];
+            flares = [];
+            scoreMultiplierTimer = 0;
+            player.shieldTime = 0;
+            player.shieldHp = 0;
+            straightSpawnTimer = 0;
+            spiralSpawnTimer = 0;
+            laserSpawnTimer = 0;
+            trackingSpawnTimer = 0;
+            trackingBarrageSpawnTimer = 0;
+            laserBarrageSpawnTimer = 0;
+            predictiveLaserSpawnTimer = 0;
+            syncBossForLevel();
+
+            if (shouldSaveCheckpoint(currentLevel)) {
+                saveCheckpoint();
+            }
+        }
+
+        function updateBoss(level) {
+            if (!boss) return false;
+
+            const tier = Math.floor(level / BOSS_LEVEL_INTERVAL);
+            boss.angle += boss.orbitSpeed;
+            const wobbleRadius = boss.orbitRadius + Math.sin(levelFrameCounter * 0.03) * 28;
+            const targetX = player.x + Math.cos(boss.angle) * wobbleRadius;
+            const targetY = player.y + Math.sin(boss.angle * 1.1) * (wobbleRadius * 0.72);
+
+            boss.x += (targetX - boss.x) * 0.03;
+            boss.y += (targetY - boss.y) * 0.03;
+
+            if (boss.flashTimer > 0) boss.flashTimer--;
+
+            boss.missileCooldown--;
+            if (boss.missileCooldown <= 0) {
+                spawnBossMissileVolley();
+                boss.missileCooldown = Math.max(80, 160 - tier * 10);
+            }
+
+            boss.burstCooldown--;
+            if (boss.burstCooldown <= 0) {
+                spawnBossBurst();
+                boss.burstCooldown = Math.max(105, 240 - tier * 12);
+            }
+
+            const bossTouchDistance = boss.size + player.size - 6;
+            if (Math.hypot(player.x - boss.x, player.y - boss.y) < bossTouchDistance && player.shieldTime <= 0) {
+                return damagePlayer(1);
+            }
+
+            return false;
+        }
+
+        function applyShopChoice(choice) {
+            if (choice === 1) {
+                player.dashTier++;
+            } else if (choice === 2) {
+                player.shieldTier++;
+            } else if (choice === 3) {
+                player.flareTier++;
+            } else if (choice === 4) {
+                player.radarTier++;
+            } else if (choice === 5) {
+                player.baseSpeed += SPEED_UPGRADE_AMOUNT;
+            } else if (choice === 6 && player.hp < player.maxHp) {
+                player.hp = Math.min(player.maxHp, player.hp + SHOP_HEAL_AMOUNT);
+            }
+
+            updateAbilityStats();
+            if (choice === 4 && player.radarTier === 1) {
+                player.radarPulseTimer = 0;
+                player.radarRevealTimer = player.radarRevealFrames;
+            }
+            beginNextLevel();
+        }
+
+        function tryHandleShopInput() {
+            const choices = player.hp < player.maxHp
+                ? ["1", "2", "3", "4", "5", "6"]
+                : ["1", "2", "3", "4", "5"];
+            for (let i = 0; i < choices.length; i++) {
+                const key = choices[i];
+                if (keys[key]) {
+                    keys[key] = false;
+                    applyShopChoice(i + 1);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function tryHandleModeSelection() {
+            if (keys["1"]) {
+                keys["1"] = false;
+                startNewRun(GAME_MODES.CLASSIC);
+                return true;
+            }
+
+            if (keys["2"]) {
+                keys["2"] = false;
+                startNewRun(GAME_MODES.CHECKPOINT);
+                return true;
+            }
+
+            if (keys["3"]) {
+                keys["3"] = false;
+                openTestingSetup();
+                return true;
+            }
+
+            return false;
+        }
+
+        function adjustTestingField(direction) {
+            const field = getTestingFields()[testingFieldIndex];
+            const nextValue = testingConfig[field.key] + direction;
+            testingConfig[field.key] = Math.max(field.min, Math.min(field.max, nextValue));
+        }
+
+        function tryHandleTestingSetup() {
+            if (keys["Escape"] || keys["m"] || keys["M"]) {
+                keys["Escape"] = false;
+                keys["m"] = false;
+                keys["M"] = false;
+                returnToModeSelect();
+                return true;
+            }
+
+            if (keys["ArrowUp"] || keys["w"] || keys["W"]) {
+                keys["ArrowUp"] = false;
+                keys["w"] = false;
+                keys["W"] = false;
+                testingFieldIndex = (testingFieldIndex + getTestingFields().length - 1) % getTestingFields().length;
+                return true;
+            }
+
+            if (keys["ArrowDown"] || keys["s"] || keys["S"]) {
+                keys["ArrowDown"] = false;
+                keys["s"] = false;
+                keys["S"] = false;
+                testingFieldIndex = (testingFieldIndex + 1) % getTestingFields().length;
+                return true;
+            }
+
+            if (keys["ArrowLeft"] || keys["a"] || keys["A"]) {
+                keys["ArrowLeft"] = false;
+                keys["a"] = false;
+                keys["A"] = false;
+                adjustTestingField(-1);
+                return true;
+            }
+
+            if (keys["ArrowRight"] || keys["d"] || keys["D"]) {
+                keys["ArrowRight"] = false;
+                keys["d"] = false;
+                keys["D"] = false;
+                adjustTestingField(1);
+                return true;
+            }
+
+            if (keys["Enter"] || keys[" "]) {
+                keys["Enter"] = false;
+                keys[" "] = false;
+                startTestingRun();
+                return true;
+            }
+
+            return false;
+        }
+
+        // ===== UPDATE =====
+        function update() {
+            if (modeSelectActive) {
+                tryHandleModeSelection();
+                return;
+            }
+
+            if (testingSetupActive) {
+                tryHandleTestingSetup();
+                return;
+            }
+
+            // Restart
+            if (gameOver && (keys["m"] || keys["M"])) {
+                keys["m"] = false;
+                keys["M"] = false;
+                returnToModeSelect();
+                return;
+            }
+
+            if (gameOver && keys["r"]) {
+                keys["r"] = false;
+                restartRun();
+            }
+
+            if (gameOver) return;
+
+            if (shopActive) {
+                if (!tryHandleShopInput()) {
+                    shopTimer--;
+                    if (shopTimer <= 0) beginNextLevel();
+                }
+                return;
+            }
+
+            // Pause action briefly during level transitions
+            if (levelTransitionTimer > 0) {
+                levelTransitionTimer--;
+                return;
+            }
+
+            // Movement
+            if (keys["w"] || keys["ArrowUp"]) player.y -= player.speed;
+            if (keys["s"] || keys["ArrowDown"]) player.y += player.speed;
+            if (keys["a"] || keys["ArrowLeft"]) player.x -= player.speed;
+            if (keys["d"] || keys["ArrowRight"]) player.x += player.speed;
+
+            // DASH toward mouse
+            if (player.dashTier > 0 && keys[" "] && player.dashCooldown <= 0) {
+                const worldMouseX = mouse.x + camera.x;
+                const worldMouseY = mouse.y + camera.y;
+
+                const { vx, vy } = aim(player.x, player.y, worldMouseX, worldMouseY, player.dashDistance);
+
+                player.x += vx;
+                player.y += vy;
+
+                player.dashCooldown = player.dashCooldownMax;
+            }
+
+            recordPlayerHistory();
+
+            // SHIELD
+            if (player.shieldTier > 0 && keys["Shift"] && player.shieldTime <= 0 && player.shieldCooldown <= 0) {
+                player.shieldTime = player.shieldDurationFrames;
+                player.shieldHp = player.shieldMaxHp;
+                player.shieldCooldownPending = true;
+            }
+
+            // FLARES
+            if (player.flareTier > 0 && (keys["f"] || keys["F"]) && player.flareCooldown <= 0) {
+                fireFlares();
+                player.flareCooldown = player.flareCooldownMax;
+            }
+
+            if (player.dashCooldown > 0) player.dashCooldown--;
+            if (player.shieldTime > 0) player.shieldTime--;
+            if (player.shieldCooldown > 0) player.shieldCooldown--;
+            if (player.hitInvulnerability > 0) player.hitInvulnerability--;
+            resolveShieldExpiration();
+            if (player.flareCooldown > 0) player.flareCooldown--;
+            if (scoreMultiplierTimer > 0) scoreMultiplierTimer--;
+            if (player.radarTier > 0) {
+                if (player.radarPulseTimer > 0) player.radarPulseTimer--;
+                if (player.radarRevealTimer > 0) player.radarRevealTimer--;
+                if (player.radarPulseTimer <= 0) {
+                    player.radarPulseTimer = player.radarCooldownMax;
+                    player.radarRevealTimer = player.radarRevealFrames;
+                }
+            }
+
+            levelFrameCounter++;
+            const level = getCurrentLevel();
+            if (!isBossLevel(level) && levelFrameCounter >= LEVEL_DURATION_FRAMES) {
+                beginShopPhase();
+                return;
+            }
+
+            // Timed level system:
+            // L1: straight bullets only, L2: + spiral, L3: + laser
+            // L4+: all attacks speed up each level.
+            const intervals = getAttackIntervals(level);
+
+            if (isBossLevel(level) && updateBoss(level)) {
+                return;
+            }
+
+            straightSpawnTimer++;
+            if (straightSpawnTimer > intervals.straight) {
+                const { x, y } = getSpawnOutsideView();
+                spawnProjectile(x, y);
+                straightSpawnTimer = 0;
+            }
+
+            if (level >= 2) {
+                spiralSpawnTimer++;
+                if (spiralSpawnTimer > intervals.spiral) {
+                    const { x, y } = getSpawnOutsideView();
+                    spawnSpiral(x, y);
+                    spiralSpawnTimer = 0;
+                }
+            } else {
+                spiralSpawnTimer = 0;
+            }
+
+            if (level >= 3) {
+                laserSpawnTimer++;
+                if (laserSpawnTimer > intervals.laser) {
+                    spawnLaserWarning();
+                    laserSpawnTimer = 0;
+                }
+            } else {
+                laserSpawnTimer = 0;
+            }
+
+            if (level >= 5) {
+                trackingSpawnTimer++;
+                if (trackingSpawnTimer > intervals.tracking) {
+                    const { x, y } = getSpawnOutsideView();
+                    spawnTrackingProjectile(x, y);
+                    trackingSpawnTimer = 0;
+                }
+            } else {
+                trackingSpawnTimer = 0;
+            }
+
+            if (level >= 10) {
+                trackingBarrageSpawnTimer++;
+                if (trackingBarrageSpawnTimer > intervals.trackingBarrage) {
+                    spawnTrackingBarrage();
+                    trackingBarrageSpawnTimer = 0;
+                }
+            } else {
+                trackingBarrageSpawnTimer = 0;
+            }
+
+            if (level >= 20) {
+                laserBarrageSpawnTimer++;
+                if (laserBarrageSpawnTimer > intervals.laserBarrage) {
+                    spawnLaserBarrage();
+                    laserBarrageSpawnTimer = 0;
+                }
+            } else {
+                laserBarrageSpawnTimer = 0;
+            }
+
+            if (level >= 30) {
+                predictiveLaserSpawnTimer++;
+                if (predictiveLaserSpawnTimer > intervals.predictiveLaserBurst) {
+                    spawnPredictiveLaserBurst();
+                    predictiveLaserSpawnTimer = 0;
+                }
+            } else {
+                predictiveLaserSpawnTimer = 0;
+            }
+
+            // Projectiles
+            for (let p of projectiles) {
+                if (isTrackingProjectile(p)) {
+                    const target = aim(p.x, p.y, player.x, player.y, p.speed || 2.4);
+                    p.vx += (target.vx - p.vx) * (p.turnRate || 0.05);
+                    p.vy += (target.vy - p.vy) * (p.turnRate || 0.05);
+                }
+
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life--;
+                if (p.bossSafeFrames > 0) p.bossSafeFrames--;
+
+                // Trail
+                p.trail.push({ x: p.x, y: p.y });
+                if (p.trail.length > 10) p.trail.shift();
+            }
+
+            // Flares
+            for (let flare of flares) {
+                flare.x += flare.vx;
+                flare.y += flare.vy;
+                flare.life--;
+            }
+
+            // Flare collision: blue flares cancel enemy projectiles
+            const removedProjectiles = new Set();
+            const removedFlares = new Set();
+            for (let i = 0; i < flares.length; i++) {
+                if (removedFlares.has(i)) continue;
+
+                for (let j = 0; j < projectiles.length; j++) {
+                    if (removedProjectiles.has(j)) continue;
+
+                    const flare = flares[i];
+                    const p = projectiles[j];
+                    const dist = Math.hypot(flare.x - p.x, flare.y - p.y);
+                    if (dist < flare.size + p.size) {
+                        removedFlares.add(i);
+                        removedProjectiles.add(j);
+                        addScore(0.2);
+                        break;
+                    }
+                }
+            }
+
+            projectiles = projectiles.filter((p, index) => p.life > 0 && !removedProjectiles.has(index));
+            flares = flares.filter((flare, index) =>
+                flare.life > 0 &&
+                !removedFlares.has(index)
+            );
+
+            if (boss) {
+                const bossRemovedProjectiles = new Set();
+                for (let i = 0; i < projectiles.length; i++) {
+                    const p = projectiles[i];
+                    if (p.owner !== "boss" || !p.bossDamage || p.bossSafeFrames > 0) continue;
+
+                    const dist = Math.hypot(p.x - boss.x, p.y - boss.y);
+                    if (dist < boss.size + p.size) {
+                        bossRemovedProjectiles.add(i);
+                        boss.hp -= p.bossDamage;
+                        boss.flashTimer = 8;
+                        camera.shake = Math.max(camera.shake, 10);
+                        addScore(0.8);
+                    }
+                }
+
+                if (bossRemovedProjectiles.size > 0) {
+                    projectiles = projectiles.filter((p, index) => !bossRemovedProjectiles.has(index));
+                }
+
+                if (boss.hp <= 0) {
+                    addScore(8 + level);
+                    beginShopPhase();
+                    return;
+                }
+            }
+
+            // Shield collision: active shield deletes enemy projectiles on contact.
+            if (player.shieldTime > 0 && player.shieldHp > 0) {
+                const shieldRadius = player.size + 20;
+                const removedByShield = new Set();
+                for (let i = 0; i < projectiles.length; i++) {
+                    if (player.shieldHp <= 0) break;
+
+                    const p = projectiles[i];
+                    const dist = Math.hypot(p.x - player.x, p.y - player.y);
+                    if (dist < shieldRadius + p.size) {
+                        removedByShield.add(i);
+                        player.shieldHp--;
+                        addScore(0.15);
+                        if (player.shieldHp <= 0) {
+                            player.shieldTime = 0;
+                            resolveShieldExpiration();
+                            break;
+                        }
+                    }
+                }
+
+                if (removedByShield.size > 0) {
+                    projectiles = projectiles.filter((p, index) => !removedByShield.has(index));
+                }
+            }
+
+            // Projectile danger checks
+            const playerHitProjectiles = new Set();
+            for (let i = 0; i < projectiles.length; i++) {
+                const p = projectiles[i];
+
+                const dist = Math.hypot(p.x - player.x, p.y - player.y);
+                const closeDodgeDistance = player.size + CLOSE_DODGE_RADIUS;
+
+                // Near miss
+                if (!p.dodgeTriggered && dist < closeDodgeDistance && dist > player.size) {
+                    p.dodgeTriggered = true;
+                    triggerCloseDodge();
+                }
+
+                // Hit
+                if (dist < player.size) {
+                    if (player.shieldTime <= 0) {
+                        playerHitProjectiles.add(i);
+                        damagePlayer(1);
+                    }
+                }
+            }
+
+            if (playerHitProjectiles.size > 0) {
+                projectiles = projectiles.filter((p, index) => !playerHitProjectiles.has(index));
+            }
+
+            // Laser updates
+            for (let laser of lasers) {
+                if (!laser.fired) {
+                    laser.warning--;
+
+                    if (laser.warning <= 0) {
+                        laser.fired = true;
+                        laser.flash = LASER_FLASH_TIME;
+
+                        const dist = pointToSegmentDistance(
+                            player.x, player.y,
+                            laser.x1, laser.y1,
+                            laser.x2, laser.y2
+                        );
+
+                        if (dist < player.size + laser.width / 2) {
+                            if (player.shieldTime > 0) {
+                                if (laser.type === "predictive") {
+                                    player.shieldHp = 0;
+                                    player.shieldTime = 0;
+                                    resolveShieldExpiration();
+                                } else {
+                                    player.shieldHp = Math.max(0, player.shieldHp - LASER_SHIELD_DAMAGE);
+                                    if (player.shieldHp <= 0) {
+                                        player.shieldTime = 0;
+                                        resolveShieldExpiration();
+                                    }
+                                }
+                            } else {
+                                damagePlayer(1);
+                            }
+                        }
+                    }
+                } else {
+                    laser.flash--;
+                }
+            }
+
+            lasers = lasers.filter(laser => !laser.fired || laser.flash > 0);
+
+            // Camera smooth
+            camera.x += (player.x - canvas.width / 2 - camera.x) * 0.1;
+            camera.y += (player.y - canvas.height / 2 - camera.y) * 0.1;
+
+            if (camera.shake > 0) camera.shake *= 0.9;
+
+            addScore(0.02);
+        }
+
+        // ===== DRAW =====
+
+
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const shakeX = (Math.random() - 0.5) * camera.shake;
+            const shakeY = (Math.random() - 0.5) * camera.shake;
+
+            ctx.save();
+            ctx.translate(-camera.x + shakeX, -camera.y + shakeY);
+
+            // Player
+            if (player.hitInvulnerability > 0 && Math.floor(player.hitInvulnerability / 3) % 2 === 0) {
+                ctx.globalAlpha = 0.45;
+            }
+            ctx.fillStyle = player.shieldTime > 0 ? "cyan" : "white";
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Close-dodge radius indicator
+            const closeDodgeDistance = player.size + CLOSE_DODGE_RADIUS;
+            ctx.strokeStyle = scoreMultiplierTimer > 0 ? "rgba(255, 220, 80, 0.95)" : "rgba(255, 220, 80, 0.4)";
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, closeDodgeDistance, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            if (player.shieldTime > 0) {
+                ctx.strokeStyle = "rgba(0, 255, 255, 0.9)";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.size + 10, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            if (boss) {
+                ctx.fillStyle = boss.flashTimer > 0 ? "#fff3a6" : "#ff8c5a";
+                ctx.beginPath();
+                ctx.arc(boss.x, boss.y, boss.size, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = "rgba(255, 220, 120, 0.9)";
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(boss.x, boss.y, boss.size + 12, 0, Math.PI * 2);
+                ctx.stroke();
+
+                const bossHealthWidth = boss.size * 2.2;
+                const healthRatio = Math.max(0, boss.hp / boss.maxHp);
+                const healthX = boss.x - bossHealthWidth / 2;
+                const healthY = boss.y - boss.size - 26;
+
+                ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+                ctx.fillRect(healthX, healthY, bossHealthWidth, 8);
+                ctx.fillStyle = "#ff6767";
+                ctx.fillRect(healthX, healthY, bossHealthWidth * healthRatio, 8);
+            }
+
+            // Player flare projectiles
+            for (let flare of flares) {
+                ctx.fillStyle = "deepskyblue";
+                ctx.beginPath();
+                ctx.arc(flare.x, flare.y, flare.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Laser telegraph / fire effect
+            for (let laser of lasers) {
+                ctx.beginPath();
+                ctx.moveTo(laser.x1, laser.y1);
+                ctx.lineTo(laser.x2, laser.y2);
+                const isPredictiveLaser = laser.type === "predictive";
+
+                if (!laser.fired) {
+                    const pulse = 0.2 + (Math.sin(Date.now() * 0.02) + 1) * 0.15;
+                    ctx.setLineDash([16, 12]);
+                    ctx.strokeStyle = isPredictiveLaser
+                        ? `rgba(255, 170, 60, ${0.28 + pulse * 0.9})`
+                        : `rgba(255, 80, 80, ${pulse})`;
+                    ctx.lineWidth = laser.width;
+                } else {
+                    ctx.setLineDash([]);
+                    ctx.strokeStyle = isPredictiveLaser
+                        ? "rgba(255, 140, 30, 0.98)"
+                        : "rgba(255, 40, 40, 0.95)";
+                    ctx.lineWidth = laser.width + 12;
+                }
+
+                ctx.lineCap = "round";
+                ctx.stroke();
+            }
+            ctx.setLineDash([]);
+
+            function drawRadar() {
+                if (player.radarTier <= 0) return;
+
+                const radius = 100;
+                const margin = 24;
+                const centerX = canvas.width - radius - margin;
+                const centerY = radius + margin;
+
+                ctx.strokeStyle = "rgba(255,255,255,0.2)";
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+                ctx.stroke();
+
+                for (let p of projectiles) {
+                    const viewLeft = camera.x - shakeX;
+                    const viewTop = camera.y - shakeY;
+                    const viewRight = viewLeft + canvas.width;
+                    const viewBottom = viewTop + canvas.height;
+                    const isOffScreen =
+                        p.x + p.size < viewLeft || p.x - p.size > viewRight ||
+                        p.y + p.size < viewTop || p.y - p.size > viewBottom;
+
+                    // Only show bullets that are fully outside the visible screen
+                    if (isOffScreen && player.radarRevealTimer > 0) {
+                        const dx = p.x - player.x;
+                        const dy = p.y - player.y;
+                        const angle = Math.atan2(dy, dx);
+
+                        const rx = centerX + Math.cos(angle) * radius;
+                        const ry = centerY + Math.sin(angle) * radius;
+
+                        ctx.fillStyle = isTrackingProjectile(p) ? "#b56bff" : "red";
+                        ctx.beginPath();
+                        ctx.arc(rx, ry, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // Projectiles
+            for (let p of projectiles) {
+                const isTracking = isTrackingProjectile(p);
+
+                ctx.strokeStyle = isTracking ? "rgba(181,107,255,0.35)" : "rgba(255,0,0,0.3)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                p.trail.forEach((t, i) => {
+                    if (i === 0) ctx.moveTo(t.x, t.y);
+                    else ctx.lineTo(t.x, t.y);
+                });
+                ctx.stroke();
+
+                ctx.fillStyle = isTracking ? "#b56bff" : "red";
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+
+            // UI
+            ctx.fillStyle = "white";
+            ctx.font = "20px Arial";
+            ctx.fillText("Score: " + score.toFixed(0), 20, 30);
+            ctx.fillText(selectedGameMode === GAME_MODES.TESTING ? "High Score: Disabled" : "High Score: " + highScore.toFixed(0), 20, 56);
+            ctx.fillText("HP: " + formatHp(player.hp) + " / " + formatHp(player.maxHp), 20, 82);
+            const multiplierTimeLeft = Math.ceil(scoreMultiplierTimer / ASSUMED_FPS);
+            const multiplierLabel = getScoreMultiplier().toFixed(1).replace(".0", "");
+            ctx.fillStyle = scoreMultiplierTimer > 0 ? "#ffe46e" : "rgba(255,255,255,0.7)";
+            ctx.fillText("Multiplier: x" + multiplierLabel + (scoreMultiplierTimer > 0 ? " (" + multiplierTimeLeft + "s)" : ""), 20, 108);
+            ctx.fillStyle = "white";
+            const level = getCurrentLevel();
+            const bossFightActive = isBossLevel(level);
+            const secondsToNextLevel = bossFightActive ? null : getSecondsToNextLevel();
+            ctx.fillText("Mode: " + getModeLabel(), 20, 134);
+            ctx.fillText("Level: " + level, 20, 160);
+            ctx.fillText(bossFightActive ? "Boss Fight: Defeat the core" : "Next Level: " + secondsToNextLevel + "s", 20, 186);
+            let infoY = 212;
+            if (selectedGameMode === GAME_MODES.CHECKPOINT && checkpointData) {
+                ctx.fillText("Respawn Level: " + checkpointData.level, 20, infoY);
+                infoY += 26;
+            } else if (selectedGameMode === GAME_MODES.TESTING) {
+                ctx.fillText("Test Respawn: Level " + testingConfig.startLevel, 20, infoY);
+                infoY += 26;
+            }
+            if (bossFightActive && boss) {
+                ctx.fillText("Boss HP: " + boss.hp + " / " + boss.maxHp, 20, infoY);
+                infoY += 26;
+            }
+            const dashStatus = player.dashTier === 0
+                ? "Locked"
+                : (player.dashCooldown > 0 ? Math.ceil(player.dashCooldown / ASSUMED_FPS) + "s" : "Ready") +
+                (player.dashDistance > DASH_DISTANCE_START ? " | " + player.dashDistance + " range" : "");
+            const shieldStatus = player.shieldTier === 0
+                ? "Locked"
+                : (player.shieldTime > 0
+                    ? "Active (" + player.shieldHp + " HP)"
+                    : (player.shieldCooldown > 0 ? Math.ceil(player.shieldCooldown / ASSUMED_FPS) + "s" : "Ready"));
+            const flareStatus = player.flareTier === 0
+                ? "Locked"
+                : (player.flareCooldown > 0 ? Math.ceil(player.flareCooldown / ASSUMED_FPS) + "s" : "Ready") +
+                (player.flareRadialShots > 0 ? " | +" + player.flareRadialShots + " radial" : "");
+            const radarStatus = player.radarTier === 0
+                ? "Locked"
+                : (player.radarPulseTimer > 0 ? Math.ceil(player.radarPulseTimer / ASSUMED_FPS) + "s" : "Ping") +
+                " | " + player.radarSpawnMargin + "px lead";
+            const abilityStartY = infoY;
+            ctx.fillText("Dash [Space]: " + dashStatus, 20, abilityStartY);
+            ctx.fillText("Shield [Shift]: " + shieldStatus, 20, abilityStartY + 26);
+            ctx.fillText("Flares [F]: " + flareStatus, 20, abilityStartY + 52);
+            ctx.fillText("Radar: " + radarStatus, 20, abilityStartY + 78);
+            drawRadar();
+
+            if (modeSelectActive) {
+                ctx.save();
+                ctx.fillStyle = "rgba(0, 0, 0, 0.84)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.textAlign = "center";
+                ctx.fillStyle = "white";
+                ctx.font = "bold 56px Arial";
+                ctx.fillText("SELECT MODE", canvas.width / 2, 120);
+                ctx.font = "24px Arial";
+                ctx.fillText("1. Classic  -  Death restarts from Level 1", canvas.width / 2, 240);
+                ctx.fillText("2. Checkpoint  -  Saves after Levels 5, 10, 15...", canvas.width / 2, 290);
+                ctx.fillText("      You restart from the next level after that checkpoint", canvas.width / 2, 324);
+                ctx.fillText("3. Testing  -  Pick your level and upgrades", canvas.width / 2, 374);
+                ctx.fillText("      High score is disabled and deaths restart at that setup", canvas.width / 2, 408);
+                ctx.fillStyle = "rgba(255,255,255,0.82)";
+                ctx.font = "20px Arial";
+                ctx.fillText("High Score: " + highScore.toFixed(0), canvas.width / 2, 480);
+                ctx.fillText("Press 1, 2, or 3 to begin", canvas.width / 2, 530);
+                ctx.restore();
+            } else if (testingSetupActive) {
+                const fields = getTestingFields();
+                const previewSpeed = 4 + testingConfig.speedUps * SPEED_UPGRADE_AMOUNT;
+
+                ctx.save();
+                ctx.fillStyle = "rgba(0, 0, 0, 0.88)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.textAlign = "center";
+                ctx.fillStyle = "white";
+                ctx.font = "bold 52px Arial";
+                ctx.fillText("TESTING SETUP", canvas.width / 2, 100);
+                ctx.font = "21px Arial";
+                ctx.fillText("High scores are disabled in Testing mode", canvas.width / 2, 145);
+                ctx.fillText("Up/Down: select  |  Left/Right: change  |  Enter: start  |  Esc: back", canvas.width / 2, 178);
+
+                ctx.font = "24px Arial";
+                fields.forEach((field, index) => {
+                    const y = 260 + index * 54;
+                    ctx.fillStyle = index === testingFieldIndex ? "#ffe46e" : "white";
+                    ctx.fillText(field.label + ": " + testingConfig[field.key], canvas.width / 2, y);
+                });
+
+                ctx.fillStyle = "rgba(255,255,255,0.82)";
+                ctx.font = "20px Arial";
+                ctx.fillText("Preview Base Speed: " + previewSpeed.toFixed(1), canvas.width / 2, 620);
+                ctx.fillText("Deaths restart from the selected level and loadout", canvas.width / 2, 655);
+                ctx.restore();
+            } else if (shopActive) {
+                const timeLeft = Math.max(0, Math.ceil(shopTimer / ASSUMED_FPS));
+                const nextDash = cooldownFromTier(player.dashTier + 1, DASH_COOLDOWN_START, DASH_COOLDOWN_STEP, DASH_COOLDOWN_MIN);
+                const nextShield = cooldownFromTier(player.shieldTier + 1, SHIELD_COOLDOWN_START, SHIELD_COOLDOWN_STEP, SHIELD_COOLDOWN_MIN);
+                const nextShieldDuration = Math.min(SHIELD_DURATION_MAX, SHIELD_DURATION_START + player.shieldTier * SHIELD_DURATION_STEP);
+                const nextShieldHp = 1 + Math.floor(player.shieldTier / 2);
+                const nextFlare = cooldownFromTier(player.flareTier + 1, FLARE_COOLDOWN_START, FLARE_COOLDOWN_STEP, FLARE_COOLDOWN_MIN);
+                const nextRadar = cooldownFromTier(player.radarTier + 1, RADAR_COOLDOWN_START, RADAR_COOLDOWN_STEP, RADAR_COOLDOWN_MIN);
+                const currentDashOverflow = getOverflowUpgradeTiers(player.dashTier, DASH_COOLDOWN_START, DASH_COOLDOWN_STEP, DASH_COOLDOWN_MIN);
+                const nextDashOverflow = getOverflowUpgradeTiers(player.dashTier + 1, DASH_COOLDOWN_START, DASH_COOLDOWN_STEP, DASH_COOLDOWN_MIN);
+                const nextDashDistance = DASH_DISTANCE_START + nextDashOverflow * DASH_DISTANCE_STEP;
+                const currentFlareOverflow = getOverflowUpgradeTiers(player.flareTier, FLARE_COOLDOWN_START, FLARE_COOLDOWN_STEP, FLARE_COOLDOWN_MIN);
+                const nextFlareOverflow = getOverflowUpgradeTiers(player.flareTier + 1, FLARE_COOLDOWN_START, FLARE_COOLDOWN_STEP, FLARE_COOLDOWN_MIN);
+                const nextFlareRadialShots = nextFlareOverflow * FLARE_RADIAL_SHOTS_STEP;
+                const nextRadarMargin = 50 + (player.radarTier + 1) * RADAR_SPAWN_MARGIN_STEP;
+                const canBuyHeal = player.hp < player.maxHp;
+
+                ctx.save();
+                ctx.fillStyle = "rgba(0, 0, 0, 0.78)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.textAlign = "center";
+                ctx.fillStyle = "white";
+                ctx.font = "bold 56px Arial";
+                ctx.fillText("SHOP", canvas.width / 2, 90);
+                ctx.font = "22px Arial";
+                ctx.fillText("Choose one upgrade for Level " + (currentLevel + 1) + "  |  " + timeLeft + "s", canvas.width / 2, 130);
+
+                ctx.font = "24px Arial";
+                ctx.fillText("1. Dash  -> " + (nextDashOverflow > currentDashOverflow
+                    ? "+" + (nextDashDistance - player.dashDistance) + " range (" + nextDashDistance + " total)"
+                    : formatCooldown(nextDash) + " cooldown"), canvas.width / 2, 210);
+                ctx.fillText("2. Shield -> " + formatCooldown(nextShield) + ", " + formatCooldown(nextShieldDuration) + ", " + nextShieldHp + " HP", canvas.width / 2, 250);
+                ctx.fillText("3. Flares -> " + (nextFlareOverflow > currentFlareOverflow
+                    ? "+" + (nextFlareRadialShots - player.flareRadialShots) + " radial flares"
+                    : formatCooldown(nextFlare) + " cooldown"), canvas.width / 2, 290);
+                ctx.fillText("4. Radar -> " + formatCooldown(nextRadar) + ", " + nextRadarMargin + "px warning lead", canvas.width / 2, 330);
+                ctx.fillText("5. Base Speed + " + SPEED_UPGRADE_AMOUNT.toFixed(1), canvas.width / 2, 370);
+                if (canBuyHeal) {
+                    ctx.fillText("6. Repair + " + SHOP_HEAL_AMOUNT + " HP (" + formatHp(player.hp) + " -> " + formatHp(Math.min(player.maxHp, player.hp + SHOP_HEAL_AMOUNT)) + ")", canvas.width / 2, 410);
+                }
+
+                ctx.font = "19px Arial";
+                ctx.fillStyle = "rgba(255,255,255,0.85)";
+                ctx.fillText("Shield cooldown now begins when the shield ends. Normal lasers deal " + LASER_SHIELD_DAMAGE + " shield damage.", canvas.width / 2, canBuyHeal ? 458 : 418);
+                ctx.fillText("Press " + (canBuyHeal ? "1-6" : "1-5") + " to buy. If time runs out, no upgrade is selected.", canvas.width / 2, canBuyHeal ? 488 : 448);
+                ctx.restore();
+            } else if (!gameOver && levelTransitionTimer > 0) {
+                const progress = levelTransitionTimer / LEVEL_TRANSITION_FRAMES;
+                ctx.save();
+                ctx.fillStyle = `rgba(0, 0, 0, ${0.25 + progress * 0.4})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = `rgba(255, 255, 255, ${0.5 + progress * 0.5})`;
+                ctx.textAlign = "center";
+                ctx.font = "bold 62px Arial";
+                ctx.fillText((isBossLevel(level) ? "BOSS LEVEL " : "LEVEL ") + level, canvas.width / 2, canvas.height / 2 - 10);
+                ctx.font = "24px Arial";
+                ctx.fillText(isBossLevel(level) ? "Turn its missiles back on it" : "Get Ready", canvas.width / 2, canvas.height / 2 + 34);
+                ctx.restore();
+            }
+
+            if (gameOver) {
+                const restartTarget = selectedGameMode === GAME_MODES.TESTING
+                    ? "Level " + testingConfig.startLevel
+                    : (selectedGameMode === GAME_MODES.CHECKPOINT && checkpointData
+                        ? "Level " + checkpointData.level
+                        : "Level 1");
+
+                ctx.save();
+                ctx.textAlign = "center";
+                ctx.fillStyle = "white";
+                ctx.font = "bold 44px Arial";
+                ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 30);
+                ctx.font = "24px Arial";
+                ctx.fillText("Press R to restart from " + restartTarget, canvas.width / 2, canvas.height / 2 + 12);
+                ctx.fillText("Press M to return to mode select", canvas.width / 2, canvas.height / 2 + 48);
+                ctx.restore();
+            }
+
+        }
+
+        // ===== LOOP =====
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+    </script>
+</body>
+
+</html>
