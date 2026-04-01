@@ -5,12 +5,15 @@ const LEVEL_DURATION = 20;
 const LEVEL_DURATION_FRAMES = LEVEL_DURATION * ASSUMED_FPS;
 const LEVEL_TRANSITION_FRAMES = 90;
 const SHOP_DURATION_FRAMES = 15 * ASSUMED_FPS;
-const LASER_WARNING_TIME = 70;
+const LASER_WARNING_TIME = 1 * ASSUMED_FPS;
 const LASER_FLASH_TIME = 8;
 const PREDICTIVE_LASER_BURST_COUNT = 5;
 const PREDICTIVE_LASER_GAP_FRAMES = 18;
 const PLAYER_HISTORY_FRAMES = ASSUMED_FPS;
 const FLARE_LIFE = 60;
+const TRACKING_ONSCREEN_LIFETIME_BONUS = 6 * ASSUMED_FPS;
+const MIN_VIEW_SCALE = 0.68;
+const VIEW_SCALE_PER_SPEED = 0.08;
 const DASH_COOLDOWN_START = 240;
 const DASH_COOLDOWN_STEP = 30;
 const DASH_COOLDOWN_MIN = 45;
@@ -31,7 +34,7 @@ const PLAYER_MAX_HP = 3;
 const PLAYER_HIT_INVULNERABILITY_FRAMES = 36;
 const SHOP_HEAL_AMOUNT = 0.5;
 const LASER_SHIELD_DAMAGE = 5;
-const CLOSE_DODGE_RADIUS = 14;
+const CLOSE_DODGE_RADIUS = 20;
 const CLOSE_DODGE_BONUS = 0.1;
 const SCORE_MULTIPLIER_VALUE = 2;
 const SCORE_MULTIPLIER_DURATION_FRAMES = 3 * ASSUMED_FPS;
@@ -232,10 +235,10 @@ class DodgingGame {
         this.scoreMultiplierTimer = 0;
         this.gameOver = false;
         this.score = startingScore;
-        this.camera.x = this.player.x - this.canvas.width / 2;
-        this.camera.y = this.player.y - this.canvas.height / 2;
-        this.camera.shake = 0;
         this.updateAbilityStats();
+        this.camera.x = this.player.x - this.getViewWidth() / 2;
+        this.camera.y = this.player.y - this.getViewHeight() / 2;
+        this.camera.shake = 0;
         this.syncBossForLevel();
     }
 
@@ -326,6 +329,36 @@ class DodgingGame {
 
     getScoreMultiplier() {
         return this.scoreMultiplierTimer > 0 ? SCORE_MULTIPLIER_VALUE : 1;
+    }
+
+    getViewScale() {
+        const extraSpeed = Math.max(0, this.player.baseSpeed - 4);
+        return Math.max(MIN_VIEW_SCALE, 1 - extraSpeed * VIEW_SCALE_PER_SPEED);
+    }
+
+    getViewWidth() {
+        return this.canvas.width / this.getViewScale();
+    }
+
+    getViewHeight() {
+        return this.canvas.height / this.getViewScale();
+    }
+
+    getViewBounds() {
+        return {
+            left: this.camera.x,
+            right: this.camera.x + this.getViewWidth(),
+            top: this.camera.y,
+            bottom: this.camera.y + this.getViewHeight()
+        };
+    }
+
+    screenToWorld(screenX, screenY) {
+        const viewScale = this.getViewScale();
+        return {
+            x: this.camera.x + screenX / viewScale,
+            y: this.camera.y + screenY / viewScale
+        };
     }
 
     formatHp(value) {
@@ -443,7 +476,8 @@ class DodgingGame {
             life: BULLET_LIFETIME,
             speed,
             turnRate: stats.turnRate,
-            dodgeTriggered: false
+            dodgeTriggered: false,
+            screenLifeBonusPending: true
         };
 
         this.projectiles.push(projectile);
@@ -452,6 +486,17 @@ class DodgingGame {
 
     isTrackingProjectile(projectile) {
         return projectile.type === "tracking" || projectile.type === "tracking-fast" || projectile.type === "boss-tracking";
+    }
+
+    isCircleOnScreen(x, y, size) {
+        const { left: viewLeft, right: viewRight, top: viewTop, bottom: viewBottom } = this.getViewBounds();
+
+        return (
+            x + size >= viewLeft &&
+            x - size <= viewRight &&
+            y + size >= viewTop &&
+            y - size <= viewBottom
+        );
     }
 
     spawnTrackingBarrage() {
@@ -469,10 +514,9 @@ class DodgingGame {
 
     getSpawnOutsideView() {
         const margin = 50;
-        const left = this.camera.x;
-        const right = this.camera.x + this.canvas.width;
-        const top = this.camera.y;
-        const bottom = this.camera.y + this.canvas.height;
+        const { left, right, top, bottom } = this.getViewBounds();
+        const viewWidth = right - left;
+        const viewHeight = bottom - top;
         const side = Math.floor(Math.random() * 4);
 
         let x;
@@ -480,15 +524,15 @@ class DodgingGame {
 
         if (side === 0) {
             x = left - margin;
-            y = top + Math.random() * this.canvas.height;
+            y = top + Math.random() * viewHeight;
         } else if (side === 1) {
             x = right + margin;
-            y = top + Math.random() * this.canvas.height;
+            y = top + Math.random() * viewHeight;
         } else if (side === 2) {
-            x = left + Math.random() * this.canvas.width;
+            x = left + Math.random() * viewWidth;
             y = top - margin;
         } else {
-            x = left + Math.random() * this.canvas.width;
+            x = left + Math.random() * viewWidth;
             y = bottom + margin;
         }
 
@@ -505,7 +549,7 @@ class DodgingGame {
         const len = Math.hypot(dx, dy) || 1;
         const dirX = dx / len;
         const dirY = dy / len;
-        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
+        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
 
         this.lasers.push({
             x1: origin.x,
@@ -521,8 +565,8 @@ class DodgingGame {
 
     spawnLaserBarrage() {
         const laserCount = 3 + Math.floor(Math.random() * 3);
-        const distance = Math.max(this.canvas.width, this.canvas.height) * 0.9;
-        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
+        const distance = Math.max(this.getViewWidth(), this.getViewHeight()) * 0.9;
+        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
         const baseAngle = Math.random() * Math.PI * 2;
 
         for (let i = 0; i < laserCount; i++) {
@@ -573,8 +617,8 @@ class DodgingGame {
     }
 
     spawnPredictiveLaserBurst() {
-        const distance = Math.max(this.canvas.width, this.canvas.height) * 1.05;
-        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
+        const distance = Math.max(this.getViewWidth(), this.getViewHeight()) * 1.05;
+        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
         const baseAngle = Math.random() * Math.PI * 2;
 
         for (let i = 0; i < PREDICTIVE_LASER_BURST_COUNT; i++) {
@@ -645,8 +689,7 @@ class DodgingGame {
     }
 
     fireFlares() {
-        const worldMouseX = this.mouse.x + this.camera.x;
-        const worldMouseY = this.mouse.y + this.camera.y;
+        const { x: worldMouseX, y: worldMouseY } = this.screenToWorld(this.mouse.x, this.mouse.y);
         const baseAngle = Math.atan2(worldMouseY - this.player.y, worldMouseX - this.player.x);
         const spread = [-0.22, 0, 0.22];
 
@@ -987,8 +1030,7 @@ class DodgingGame {
         if (this.keys.d || this.keys.ArrowRight) this.player.x += this.player.speed;
 
         if (this.player.dashTier > 0 && this.keys[" "] && this.player.dashCooldown <= 0) {
-            const worldMouseX = this.mouse.x + this.camera.x;
-            const worldMouseY = this.mouse.y + this.camera.y;
+            const { x: worldMouseX, y: worldMouseY } = this.screenToWorld(this.mouse.x, this.mouse.y);
             const { vx, vy } = this.aim(this.player.x, this.player.y, worldMouseX, worldMouseY, this.player.dashDistance);
 
             this.player.x += vx;
@@ -1108,6 +1150,16 @@ class DodgingGame {
 
             projectile.x += projectile.vx;
             projectile.y += projectile.vy;
+
+            if (
+                this.isTrackingProjectile(projectile) &&
+                projectile.screenLifeBonusPending &&
+                this.isCircleOnScreen(projectile.x, projectile.y, projectile.size)
+            ) {
+                projectile.life += TRACKING_ONSCREEN_LIFETIME_BONUS;
+                projectile.screenLifeBonusPending = false;
+            }
+
             projectile.life--;
             if (projectile.bossSafeFrames > 0) projectile.bossSafeFrames--;
 
@@ -1261,8 +1313,8 @@ class DodgingGame {
 
         this.lasers = this.lasers.filter((laser) => !laser.fired || laser.flash > 0);
 
-        this.camera.x += (this.player.x - this.canvas.width / 2 - this.camera.x) * 0.1;
-        this.camera.y += (this.player.y - this.canvas.height / 2 - this.camera.y) * 0.1;
+        this.camera.x += (this.player.x - this.getViewWidth() / 2 - this.camera.x) * 0.1;
+        this.camera.y += (this.player.y - this.getViewHeight() / 2 - this.camera.y) * 0.1;
 
         if (this.camera.shake > 0) this.camera.shake *= 0.9;
 
@@ -1271,13 +1323,21 @@ class DodgingGame {
 
     draw() {
         const ctx = this.ctx;
+        const viewScale = this.getViewScale();
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
         const shakeX = (Math.random() - 0.5) * this.camera.shake;
         const shakeY = (Math.random() - 0.5) * this.camera.shake;
 
         ctx.save();
-        ctx.translate(-this.camera.x + shakeX, -this.camera.y + shakeY);
+        ctx.setTransform(
+            viewScale,
+            0,
+            0,
+            viewScale,
+            -this.camera.x * viewScale + shakeX,
+            -this.camera.y * viewScale + shakeY
+        );
 
         if (this.player.hitInvulnerability > 0 && Math.floor(this.player.hitInvulnerability / 3) % 2 === 0) {
             ctx.globalAlpha = 0.45;
