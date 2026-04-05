@@ -17,9 +17,9 @@ const VIEW_SCALE_PER_SPEED = 0.08;
 const DASH_COOLDOWN_START = 240;
 const DASH_COOLDOWN_STEP = 30;
 const DASH_COOLDOWN_MIN = 45;
-const SHIELD_COOLDOWN_START = 420;
-const SHIELD_COOLDOWN_STEP = 60;
-const SHIELD_COOLDOWN_MIN = 90;
+const SHIELD_COOLDOWN_START = 20 * ASSUMED_FPS;
+const SHIELD_COOLDOWN_STEP = 2 * ASSUMED_FPS;
+const SHIELD_COOLDOWN_MIN = 6 * ASSUMED_FPS;
 const SHIELD_DURATION_START = 60;
 const SHIELD_DURATION_STEP = 60;
 const SHIELD_DURATION_MAX = 300;
@@ -40,10 +40,12 @@ const SCORE_MULTIPLIER_VALUE = 2;
 const SCORE_MULTIPLIER_DURATION_FRAMES = 3 * ASSUMED_FPS;
 const CHECKPOINT_INTERVAL = 5;
 const BOSS_LEVEL_INTERVAL = 10;
+// How many times the other things are reduceed
 const BOSS_BACKGROUND_SPAWN_FACTOR = 5;
-const TESTING_LEVEL_MAX = 100;
+const TESTING_TYPED_INPUT_TIMEOUT_MS = 1200;
+const TESTING_LEVEL_MAX = 1000;
 const TESTING_TIER_MAX = TESTING_LEVEL_MAX;
-const TESTING_SPEED_UP_MAX = 12;
+const TESTING_SPEED_UP_MAX = 1000;
 const GAME_MODES = {
     CLASSIC: "classic",
     CHECKPOINT: "checkpoint",
@@ -116,8 +118,7 @@ class DodgingGame {
         this.keys = {};
         this.mouse = { x: 0, y: 0 };
 
-        this.canvas.width = window.innerWidth;
-        this.canvas.height = window.innerHeight;
+        this.resizeCanvas();
 
         this.bindEvents();
 
@@ -128,24 +129,60 @@ class DodgingGame {
         this.checkpointData = null;
         this.testingConfig = this.createDefaultTestingConfig();
         this.testingFieldIndex = 0;
+        this.testingTypedInput = { fieldKey: null, value: "", lastEditTime: 0 };
 
         this.resetGame();
         this.loop();
     }
 
+    normalizeKey(key) {
+        return typeof key === "string" && key.length === 1 ? key.toLowerCase() : key;
+    }
+
     bindEvents() {
         window.addEventListener("keydown", (event) => {
-            this.keys[event.key] = true;
+            const key = this.normalizeKey(event.key);
+
+            if (this.testingSetupActive && this.tryHandleTestingTypedKey(key)) {
+                event.preventDefault();
+                return;
+            }
+
+            this.keys[key] = true;
         });
 
         window.addEventListener("keyup", (event) => {
-            this.keys[event.key] = false;
+            const key = this.normalizeKey(event.key);
+            this.keys[key] = false;
         });
 
         window.addEventListener("mousemove", (event) => {
             this.mouse.x = event.clientX;
             this.mouse.y = event.clientY;
         });
+
+        window.addEventListener("resize", () => {
+            const previousCenterX = this.camera.x + this.canvas.width / 2;
+            const previousCenterY = this.camera.y + this.canvas.height / 2;
+
+            this.resizeCanvas();
+
+            this.camera.x = previousCenterX - this.canvas.width / 2;
+            this.camera.y = previousCenterY - this.canvas.height / 2;
+        });
+    }
+
+    resizeCanvas() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    getViewWidth() {
+        return this.canvas.width;
+    }
+
+    getViewHeight() {
+        return this.canvas.height;
     }
 
     getCookie(name) {
@@ -206,6 +243,47 @@ class DodgingGame {
             { key: "flareTier", label: "Flare Tier", min: 0, max: TESTING_TIER_MAX },
             { key: "speedUps", label: "Speed Ups", min: 0, max: TESTING_SPEED_UP_MAX }
         ];
+    }
+
+    resetTestingTypedInput() {
+        this.testingTypedInput = { fieldKey: null, value: "", lastEditTime: 0 };
+    }
+
+    setTestingFieldValue(field, value) {
+        this.testingConfig[field.key] = Math.max(field.min, Math.min(field.max, value));
+    }
+
+    tryHandleTestingTypedKey(key) {
+        if (!/^\d$/.test(key) && key !== "Backspace") return false;
+
+        const field = this.getTestingFields()[this.testingFieldIndex];
+        const now = Date.now();
+        const isSameField = this.testingTypedInput.fieldKey === field.key;
+        const withinWindow = now - this.testingTypedInput.lastEditTime <= TESTING_TYPED_INPUT_TIMEOUT_MS;
+        const currentValue = isSameField && withinWindow ? this.testingTypedInput.value : String(this.testingConfig[field.key]);
+        let nextValueText;
+
+        if (key === "Backspace") {
+            nextValueText = currentValue.length > 1 ? currentValue.slice(0, -1) : "";
+        } else {
+            nextValueText = isSameField && withinWindow ? currentValue + key : key;
+        }
+
+        const normalizedValueText = nextValueText.replace(/^0+(?=\d)/, "");
+
+        this.testingTypedInput = {
+            fieldKey: field.key,
+            value: normalizedValueText,
+            lastEditTime: now
+        };
+
+        if (normalizedValueText === "") {
+            this.setTestingFieldValue(field, field.min);
+            return true;
+        }
+
+        this.setTestingFieldValue(field, Number.parseInt(normalizedValueText, 10));
+        return true;
     }
 
     createPlayer(progress = {}) {
@@ -275,6 +353,7 @@ class DodgingGame {
         this.checkpointData = null;
         this.testingConfig = this.createDefaultTestingConfig();
         this.testingFieldIndex = 0;
+        this.resetTestingTypedInput();
     }
 
     startTestingRun() {
@@ -329,36 +408,6 @@ class DodgingGame {
 
     getScoreMultiplier() {
         return this.scoreMultiplierTimer > 0 ? SCORE_MULTIPLIER_VALUE : 1;
-    }
-
-    getViewScale() {
-        const extraSpeed = Math.max(0, this.player.baseSpeed - 4);
-        return Math.max(MIN_VIEW_SCALE, 1 - extraSpeed * VIEW_SCALE_PER_SPEED);
-    }
-
-    getViewWidth() {
-        return this.canvas.width / this.getViewScale();
-    }
-
-    getViewHeight() {
-        return this.canvas.height / this.getViewScale();
-    }
-
-    getViewBounds() {
-        return {
-            left: this.camera.x,
-            right: this.camera.x + this.getViewWidth(),
-            top: this.camera.y,
-            bottom: this.camera.y + this.getViewHeight()
-        };
-    }
-
-    screenToWorld(screenX, screenY) {
-        const viewScale = this.getViewScale();
-        return {
-            x: this.camera.x + screenX / viewScale,
-            y: this.camera.y + screenY / viewScale
-        };
     }
 
     formatHp(value) {
@@ -489,7 +538,10 @@ class DodgingGame {
     }
 
     isCircleOnScreen(x, y, size) {
-        const { left: viewLeft, right: viewRight, top: viewTop, bottom: viewBottom } = this.getViewBounds();
+        const viewLeft = this.camera.x;
+        const viewRight = viewLeft + this.canvas.width;
+        const viewTop = this.camera.y;
+        const viewBottom = viewTop + this.canvas.height;
 
         return (
             x + size >= viewLeft &&
@@ -514,9 +566,10 @@ class DodgingGame {
 
     getSpawnOutsideView() {
         const margin = 50;
-        const { left, right, top, bottom } = this.getViewBounds();
-        const viewWidth = right - left;
-        const viewHeight = bottom - top;
+        const left = this.camera.x;
+        const right = this.camera.x + this.canvas.width;
+        const top = this.camera.y;
+        const bottom = this.camera.y + this.canvas.height;
         const side = Math.floor(Math.random() * 4);
 
         let x;
@@ -524,15 +577,15 @@ class DodgingGame {
 
         if (side === 0) {
             x = left - margin;
-            y = top + Math.random() * viewHeight;
+            y = top + Math.random() * this.canvas.height;
         } else if (side === 1) {
             x = right + margin;
-            y = top + Math.random() * viewHeight;
+            y = top + Math.random() * this.canvas.height;
         } else if (side === 2) {
-            x = left + Math.random() * viewWidth;
+            x = left + Math.random() * this.canvas.width;
             y = top - margin;
         } else {
-            x = left + Math.random() * viewWidth;
+            x = left + Math.random() * this.canvas.width;
             y = bottom + margin;
         }
 
@@ -549,7 +602,7 @@ class DodgingGame {
         const len = Math.hypot(dx, dy) || 1;
         const dirX = dx / len;
         const dirY = dy / len;
-        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
+        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
 
         this.lasers.push({
             x1: origin.x,
@@ -565,8 +618,8 @@ class DodgingGame {
 
     spawnLaserBarrage() {
         const laserCount = 3 + Math.floor(Math.random() * 3);
-        const distance = Math.max(this.getViewWidth(), this.getViewHeight()) * 0.9;
-        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
+        const distance = Math.max(this.canvas.width, this.canvas.height) * 0.9;
+        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
         const baseAngle = Math.random() * Math.PI * 2;
 
         for (let i = 0; i < laserCount; i++) {
@@ -617,8 +670,8 @@ class DodgingGame {
     }
 
     spawnPredictiveLaserBurst() {
-        const distance = Math.max(this.getViewWidth(), this.getViewHeight()) * 1.05;
-        const beamLength = Math.hypot(this.getViewWidth(), this.getViewHeight()) * 2;
+        const distance = Math.max(this.canvas.width, this.canvas.height) * 1.05;
+        const beamLength = Math.hypot(this.canvas.width, this.canvas.height) * 2;
         const baseAngle = Math.random() * Math.PI * 2;
 
         for (let i = 0; i < PREDICTIVE_LASER_BURST_COUNT; i++) {
@@ -689,7 +742,8 @@ class DodgingGame {
     }
 
     fireFlares() {
-        const { x: worldMouseX, y: worldMouseY } = this.screenToWorld(this.mouse.x, this.mouse.y);
+        const worldMouseX = this.mouse.x + this.camera.x;
+        const worldMouseY = this.mouse.y + this.camera.y;
         const baseAngle = Math.atan2(worldMouseY - this.player.y, worldMouseX - this.player.x);
         const spread = [-0.22, 0, 0.22];
 
@@ -932,46 +986,44 @@ class DodgingGame {
     adjustTestingField(direction) {
         const field = this.getTestingFields()[this.testingFieldIndex];
         const nextValue = this.testingConfig[field.key] + direction;
-        this.testingConfig[field.key] = Math.max(field.min, Math.min(field.max, nextValue));
+        this.resetTestingTypedInput();
+        this.setTestingFieldValue(field, nextValue);
     }
 
     tryHandleTestingSetup() {
-        if (this.keys.Escape || this.keys.m || this.keys.M) {
+        if (this.keys.Escape || this.keys.m) {
             this.keys.Escape = false;
             this.keys.m = false;
-            this.keys.M = false;
             this.returnToModeSelect();
             return true;
         }
 
-        if (this.keys.ArrowUp || this.keys.w || this.keys.W) {
+        if (this.keys.ArrowUp || this.keys.w) {
             this.keys.ArrowUp = false;
             this.keys.w = false;
-            this.keys.W = false;
+            this.resetTestingTypedInput();
             this.testingFieldIndex = (this.testingFieldIndex + this.getTestingFields().length - 1) % this.getTestingFields().length;
             return true;
         }
 
-        if (this.keys.ArrowDown || this.keys.s || this.keys.S) {
+        if (this.keys.ArrowDown || this.keys.s) {
             this.keys.ArrowDown = false;
             this.keys.s = false;
-            this.keys.S = false;
+            this.resetTestingTypedInput();
             this.testingFieldIndex = (this.testingFieldIndex + 1) % this.getTestingFields().length;
             return true;
         }
 
-        if (this.keys.ArrowLeft || this.keys.a || this.keys.A) {
+        if (this.keys.ArrowLeft || this.keys.a) {
             this.keys.ArrowLeft = false;
             this.keys.a = false;
-            this.keys.A = false;
             this.adjustTestingField(-1);
             return true;
         }
 
-        if (this.keys.ArrowRight || this.keys.d || this.keys.D) {
+        if (this.keys.ArrowRight || this.keys.d) {
             this.keys.ArrowRight = false;
             this.keys.d = false;
-            this.keys.D = false;
             this.adjustTestingField(1);
             return true;
         }
@@ -997,9 +1049,8 @@ class DodgingGame {
             return;
         }
 
-        if (this.gameOver && (this.keys.m || this.keys.M)) {
+        if (this.gameOver && this.keys.m) {
             this.keys.m = false;
-            this.keys.M = false;
             this.returnToModeSelect();
             return;
         }
@@ -1030,7 +1081,8 @@ class DodgingGame {
         if (this.keys.d || this.keys.ArrowRight) this.player.x += this.player.speed;
 
         if (this.player.dashTier > 0 && this.keys[" "] && this.player.dashCooldown <= 0) {
-            const { x: worldMouseX, y: worldMouseY } = this.screenToWorld(this.mouse.x, this.mouse.y);
+            const worldMouseX = this.mouse.x + this.camera.x;
+            const worldMouseY = this.mouse.y + this.camera.y;
             const { vx, vy } = this.aim(this.player.x, this.player.y, worldMouseX, worldMouseY, this.player.dashDistance);
 
             this.player.x += vx;
@@ -1046,7 +1098,7 @@ class DodgingGame {
             this.player.shieldCooldownPending = true;
         }
 
-        if (this.player.flareTier > 0 && (this.keys.f || this.keys.F) && this.player.flareCooldown <= 0) {
+        if (this.player.flareTier > 0 && this.keys.f && this.player.flareCooldown <= 0) {
             this.fireFlares();
             this.player.flareCooldown = this.player.flareCooldownMax;
         }
@@ -1313,8 +1365,8 @@ class DodgingGame {
 
         this.lasers = this.lasers.filter((laser) => !laser.fired || laser.flash > 0);
 
-        this.camera.x += (this.player.x - this.getViewWidth() / 2 - this.camera.x) * 0.1;
-        this.camera.y += (this.player.y - this.getViewHeight() / 2 - this.camera.y) * 0.1;
+        this.camera.x += (this.player.x - this.canvas.width / 2 - this.camera.x) * 0.1;
+        this.camera.y += (this.player.y - this.canvas.height / 2 - this.camera.y) * 0.1;
 
         if (this.camera.shake > 0) this.camera.shake *= 0.9;
 
@@ -1323,21 +1375,13 @@ class DodgingGame {
 
     draw() {
         const ctx = this.ctx;
-        const viewScale = this.getViewScale();
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
         const shakeX = (Math.random() - 0.5) * this.camera.shake;
         const shakeY = (Math.random() - 0.5) * this.camera.shake;
 
         ctx.save();
-        ctx.setTransform(
-            viewScale,
-            0,
-            0,
-            viewScale,
-            -this.camera.x * viewScale + shakeX,
-            -this.camera.y * viewScale + shakeY
-        );
+        ctx.translate(-this.camera.x + shakeX, -this.camera.y + shakeY);
 
         if (this.player.hitInvulnerability > 0 && Math.floor(this.player.hitInvulnerability / 3) % 2 === 0) {
             ctx.globalAlpha = 0.45;
@@ -1532,11 +1576,12 @@ class DodgingGame {
             ctx.fillText("TESTING SETUP", this.canvas.width / 2, 100);
             ctx.font = "21px Arial";
             ctx.fillText("High scores are disabled in Testing mode", this.canvas.width / 2, 145);
-            ctx.fillText("Up/Down: select  |  Left/Right: change  |  Enter: start  |  Esc: back", this.canvas.width / 2, 178);
+            ctx.fillText("Type digits to set a value  |  Backspace: erase  |  Enter: start  |  Esc: back", this.canvas.width / 2, 178);
+            ctx.fillText("Up/Down: select  |  Left/Right: change", this.canvas.width / 2, 208);
 
             ctx.font = "24px Arial";
             fields.forEach((field, index) => {
-                const y = 260 + index * 54;
+                const y = 278 + index * 54;
                 ctx.fillStyle = index === this.testingFieldIndex ? "#ffe46e" : "white";
                 ctx.fillText(field.label + ": " + this.testingConfig[field.key], this.canvas.width / 2, y);
             });
