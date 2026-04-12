@@ -691,7 +691,9 @@ class DodgingGame {
                 type: "boss-burst",
                 trail: [],
                 life: Math.floor(BULLET_LIFETIME * 0.7),
-                dodgeTriggered: false
+                dodgeTriggered: false,
+                bossDamage: 1,
+                bossSafeFrames: 24
             });
         }
     }
@@ -1202,12 +1204,13 @@ class DodgingGame {
             const bossRemovedProjectiles = new Set();
             for (let i = 0; i < this.projectiles.length; i++) {
                 const projectile = this.projectiles[i];
-                if (projectile.owner !== "boss" || !projectile.bossDamage || projectile.bossSafeFrames > 0) continue;
+                const bossDamage = projectile.bossDamage ?? 1;
+                if (bossDamage <= 0 || (projectile.bossSafeFrames ?? 0) > 0) continue;
 
                 const dist = Math.hypot(projectile.x - this.boss.x, projectile.y - this.boss.y);
                 if (dist < this.boss.size + projectile.size) {
                     bossRemovedProjectiles.add(i);
-                    this.boss.hp -= projectile.bossDamage;
+                    this.boss.hp -= bossDamage;
                     this.boss.flashTimer = 8;
                     this.camera.shake = Math.max(this.camera.shake, 10);
                     this.addScore(0.8);
@@ -1620,7 +1623,7 @@ class DodgingGame {
             ctx.font = "bold 62px Arial";
             ctx.fillText((this.isBossLevel(level) ? "BOSS LEVEL " : "LEVEL ") + level, this.canvas.width / 2, this.canvas.height / 2 - 10);
             ctx.font = "24px Arial";
-            ctx.fillText(this.isBossLevel(level) ? "Turn its missiles back on it" : "Get Ready", this.canvas.width / 2, this.canvas.height / 2 + 34);
+            ctx.fillText(this.isBossLevel(level) ? "Any projectile can damage the core" : "Get Ready", this.canvas.width / 2, this.canvas.height / 2 + 34);
             ctx.restore();
         }
 

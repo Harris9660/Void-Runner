@@ -39,7 +39,7 @@ class Player {
 class Boss {
     constructor(level, player) {
         const tier = Math.floor(level / BOSS_LEVEL_INTERVAL);
-        const maxHp = 8 + tier * 4;
+        const maxHp = (8 + tier * 4) * 2;
 
         this.x = player.x + 260;
         this.y = player.y - 180;
@@ -47,8 +47,8 @@ class Boss {
         this.hp = maxHp;
         this.maxHp = maxHp;
         this.angle = Math.random() * Math.PI * 2;
-        this.orbitRadius = 240 + tier * 16;
-        this.orbitSpeed = 0.008 + tier * 0.0008;
+        this.orbitRadius = 240 + tier * 14;
+        this.orbitSpeed = 0.008 + tier * 0.0005;
         this.missileCooldown = 90;
         this.burstCooldown = 150;
         this.flashTimer = 0;
