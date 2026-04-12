@@ -1,113 +1,3 @@
-const START_POSITION = { x: 1000, y: 1000 };
-const BULLET_LIFETIME = 60 * 12;
-const ASSUMED_FPS = 60;
-const LEVEL_DURATION = 20;
-const LEVEL_DURATION_FRAMES = LEVEL_DURATION * ASSUMED_FPS;
-const LEVEL_TRANSITION_FRAMES = 90;
-const SHOP_DURATION_FRAMES = 15 * ASSUMED_FPS;
-const LASER_WARNING_TIME = 1 * ASSUMED_FPS;
-const LASER_FLASH_TIME = 8;
-const PREDICTIVE_LASER_BURST_COUNT = 5;
-const PREDICTIVE_LASER_GAP_FRAMES = 18;
-const PLAYER_HISTORY_FRAMES = ASSUMED_FPS;
-const FLARE_LIFE = 60;
-const TRACKING_ONSCREEN_LIFETIME_BONUS = 6 * ASSUMED_FPS;
-const MIN_VIEW_SCALE = 0.68;
-const VIEW_SCALE_PER_SPEED = 0.08;
-const DASH_COOLDOWN_START = 240;
-const DASH_COOLDOWN_STEP = 30;
-const DASH_COOLDOWN_MIN = 45;
-const SHIELD_COOLDOWN_START = 420;
-const SHIELD_COOLDOWN_STEP = 60;
-const SHIELD_COOLDOWN_MIN = 90;
-const SHIELD_DURATION_START = 60;
-const SHIELD_DURATION_STEP = 60;
-const SHIELD_DURATION_MAX = 300;
-const FLARE_COOLDOWN_START = 300;
-const FLARE_COOLDOWN_STEP = 35;
-const FLARE_COOLDOWN_MIN = 70;
-const SPEED_UPGRADE_AMOUNT = 0.4;
-const DASH_DISTANCE_START = 50;
-const DASH_DISTANCE_STEP = 12;
-const FLARE_RADIAL_SHOTS_STEP = 4;
-const PLAYER_MAX_HP = 3;
-const PLAYER_HIT_INVULNERABILITY_FRAMES = 36;
-const SHOP_HEAL_AMOUNT = 0.5;
-const LASER_SHIELD_DAMAGE = 5;
-const CLOSE_DODGE_RADIUS = 20;
-const CLOSE_DODGE_BONUS = 0.1;
-const SCORE_MULTIPLIER_VALUE = 2;
-const SCORE_MULTIPLIER_DURATION_FRAMES = 3 * ASSUMED_FPS;
-const CHECKPOINT_INTERVAL = 5;
-const BOSS_LEVEL_INTERVAL = 10;
-const BOSS_BACKGROUND_SPAWN_FACTOR = 5;
-const TESTING_LEVEL_MAX = 100;
-const TESTING_TIER_MAX = TESTING_LEVEL_MAX;
-const TESTING_SPEED_UP_MAX = 12;
-const GAME_MODES = {
-    CLASSIC: "classic",
-    CHECKPOINT: "checkpoint",
-    TESTING: "testing"
-};
-const HIGH_SCORE_COOKIE_NAME = "space_traverse_high_score";
-
-class Player {
-    constructor(progress = {}) {
-        this.x = START_POSITION.x;
-        this.y = START_POSITION.y;
-        this.size = 15;
-        this.maxHp = PLAYER_MAX_HP;
-        this.hp = PLAYER_MAX_HP;
-        this.hitInvulnerability = 0;
-        this.baseSpeed = progress.baseSpeed ?? 4;
-        this.speed = progress.baseSpeed ?? 4;
-        this.dashCooldown = 0;
-        this.shieldTime = 0;
-        this.shieldCooldown = 0;
-        this.flareCooldown = 0;
-        this.dashTier = progress.dashTier ?? 0;
-        this.shieldTier = progress.shieldTier ?? 0;
-        this.flareTier = progress.flareTier ?? 0;
-        this.dashCooldownMax = Infinity;
-        this.dashDistance = 0;
-        this.shieldCooldownMax = Infinity;
-        this.shieldDurationFrames = 0;
-        this.shieldMaxHp = 0;
-        this.shieldHp = 0;
-        this.shieldCooldownPending = false;
-        this.flareCooldownMax = Infinity;
-        this.flareRadialShots = 0;
-    }
-
-    getProgress() {
-        return {
-            baseSpeed: this.baseSpeed,
-            dashTier: this.dashTier,
-            shieldTier: this.shieldTier,
-            flareTier: this.flareTier
-        };
-    }
-}
-
-class Boss {
-    constructor(level, player) {
-        const tier = Math.floor(level / BOSS_LEVEL_INTERVAL);
-        const maxHp = 8 + tier * 4;
-
-        this.x = player.x + 260;
-        this.y = player.y - 180;
-        this.size = 46 + tier * 4;
-        this.hp = maxHp;
-        this.maxHp = maxHp;
-        this.angle = Math.random() * Math.PI * 2;
-        this.orbitRadius = 240 + tier * 16;
-        this.orbitSpeed = 0.008 + tier * 0.0008;
-        this.missileCooldown = 90;
-        this.burstCooldown = 150;
-        this.flashTimer = 0;
-    }
-}
-
 class DodgingGame {
     constructor(canvas) {
         this.canvas = canvas;
@@ -217,11 +107,11 @@ class DodgingGame {
 
     getTestingFields() {
         return [
-            { key: "startLevel", label: "Start Level", min: 1, max: TESTING_LEVEL_MAX },
-            { key: "dashTier", label: "Dash Tier", min: 0, max: TESTING_TIER_MAX },
-            { key: "shieldTier", label: "Shield Tier", min: 0, max: TESTING_TIER_MAX },
-            { key: "flareTier", label: "Flare Tier", min: 0, max: TESTING_TIER_MAX },
-            { key: "speedUps", label: "Speed Ups", min: 0, max: TESTING_SPEED_UP_MAX }
+            { key: "startLevel", label: "Start Level", min: 1 },
+            { key: "dashTier", label: "Dash Tier", min: 0 },
+            { key: "shieldTier", label: "Shield Tier", min: 0 },
+            { key: "flareTier", label: "Flare Tier", min: 0 },
+            { key: "speedUps", label: "Speed Ups", min: 0 }
         ];
     }
 
@@ -234,7 +124,11 @@ class DodgingGame {
         if (!Number.isFinite(parsedValue)) return fallback;
 
         const integerValue = Math.trunc(parsedValue);
-        return Math.max(field.min, Math.min(field.max, integerValue));
+        if (typeof field.max === "number") {
+            return Math.max(field.min, Math.min(field.max, integerValue));
+        }
+
+        return Math.max(field.min, integerValue);
     }
 
     getSelectedTestingField() {
@@ -1755,6 +1649,3 @@ class DodgingGame {
         requestAnimationFrame(() => this.loop());
     }
 }
-
-const canvas = document.getElementById("game");
-new DodgingGame(canvas);
