@@ -128,6 +128,9 @@ class DodgingGame {
         this.checkpointData = null;
         this.testingConfig = this.createDefaultTestingConfig();
         this.testingFieldIndex = 0;
+        this.testingInputQueue = [];
+        this.testingFieldBuffer = "";
+        this.testingFieldBufferKey = null;
 
         this.resetGame();
         this.loop();
@@ -135,6 +138,20 @@ class DodgingGame {
 
     bindEvents() {
         window.addEventListener("keydown", (event) => {
+            if (
+                this.testingSetupActive &&
+                !event.repeat &&
+                (/^\d$/.test(event.key) || event.key === "Backspace")
+            ) {
+                this.testingInputQueue.push(event.key);
+                event.preventDefault();
+            } else if (
+                this.testingSetupActive &&
+                (event.key === " " || event.key === "ArrowUp" || event.key === "ArrowDown")
+            ) {
+                event.preventDefault();
+            }
+
             this.keys[event.key] = true;
         });
 
@@ -208,6 +225,98 @@ class DodgingGame {
         ];
     }
 
+    getTestingField(key) {
+        return this.getTestingFields().find((field) => field.key === key) ?? null;
+    }
+
+    normalizeTestingValue(field, value, fallback = field.min) {
+        const parsedValue = typeof value === "number" ? value : Number.parseInt(value, 10);
+        if (!Number.isFinite(parsedValue)) return fallback;
+
+        const integerValue = Math.trunc(parsedValue);
+        return Math.max(field.min, Math.min(field.max, integerValue));
+    }
+
+    getSelectedTestingField() {
+        return this.getTestingFields()[this.testingFieldIndex] ?? null;
+    }
+
+    resetTestingInputState() {
+        this.testingInputQueue = [];
+        this.testingFieldBuffer = "";
+        this.testingFieldBufferKey = null;
+
+        const testingKeys = ["Backspace", "Enter", " ", "Escape", "m", "M", "ArrowUp", "ArrowDown", "w", "W", "s", "S"];
+        for (let digit = 0; digit <= 9; digit++) {
+            testingKeys.push(String(digit));
+        }
+
+        for (const key of testingKeys) {
+            this.keys[key] = false;
+        }
+    }
+
+    setTestingFieldBuffer(key, buffer) {
+        const field = this.getTestingField(key);
+        if (!field) return;
+
+        this.testingFieldBufferKey = key;
+        this.testingFieldBuffer = buffer;
+
+        const previewValue = buffer === "" ? field.min : buffer;
+        this.testingConfig[key] = this.normalizeTestingValue(field, previewValue, field.min);
+    }
+
+    appendTestingFieldDigit(digit) {
+        const field = this.getSelectedTestingField();
+        if (!field) return;
+
+        const currentBuffer = this.testingFieldBufferKey === field.key ? this.testingFieldBuffer : "";
+        const nextBuffer = currentBuffer === "0" ? digit : currentBuffer + digit;
+        this.setTestingFieldBuffer(field.key, nextBuffer);
+    }
+
+    removeTestingFieldDigit() {
+        const field = this.getSelectedTestingField();
+        if (!field) return;
+
+        const currentBuffer = this.testingFieldBufferKey === field.key
+            ? this.testingFieldBuffer
+            : String(this.testingConfig[field.key]);
+        const nextBuffer = currentBuffer.slice(0, -1);
+
+        this.setTestingFieldBuffer(field.key, nextBuffer);
+    }
+
+    commitTestingFieldBuffer() {
+        if (!this.testingFieldBufferKey) return;
+
+        const field = this.getTestingField(this.testingFieldBufferKey);
+        if (!field) {
+            this.resetTestingInputState();
+            return;
+        }
+
+        const committedValue = this.testingFieldBuffer === "" ? field.min : this.testingFieldBuffer;
+        this.testingConfig[field.key] = this.normalizeTestingValue(field, committedValue, field.min);
+        this.testingFieldBuffer = "";
+        this.testingFieldBufferKey = null;
+    }
+
+    consumeTestingInputQueue() {
+        const queuedKeys = this.testingInputQueue;
+        this.testingInputQueue = [];
+        return queuedKeys;
+    }
+
+    getTestingFieldDisplayValue(field) {
+        if (this.testingFieldBufferKey !== field.key) {
+            return String(this.testingConfig[field.key]);
+        }
+
+        return this.testingFieldBuffer === "" ? "_" : this.testingFieldBuffer;
+    }
+
     createPlayer(progress = {}) {
         this.player = new Player(progress);
     }
@@ -261,6 +370,7 @@ class DodgingGame {
         this.modeSelectActive = false;
         this.testingSetupActive = false;
         this.checkpointData = null;
+        this.resetTestingInputState();
         this.resetGame();
 
         if (this.selectedGameMode === GAME_MODES.CHECKPOINT) {
@@ -275,13 +385,16 @@ class DodgingGame {
         this.checkpointData = null;
         this.testingConfig = this.createDefaultTestingConfig();
         this.testingFieldIndex = 0;
+        this.resetTestingInputState();
     }
 
     startTestingRun() {
+        this.commitTestingFieldBuffer();
         this.selectedGameMode = GAME_MODES.TESTING;
         this.modeSelectActive = false;
         this.testingSetupActive = false;
         this.checkpointData = null;
+        this.resetTestingInputState();
         this.resetGame(this.testingConfig.startLevel, 0, this.getTestingPlayerProgress());
     }
 
@@ -304,6 +417,7 @@ class DodgingGame {
         this.modeSelectActive = true;
         this.testingSetupActive = false;
         this.checkpointData = null;
+        this.resetTestingInputState();
         this.resetGame();
     }
 
@@ -929,17 +1043,24 @@ class DodgingGame {
         return false;
     }
 
-    adjustTestingField(direction) {
-        const field = this.getTestingFields()[this.testingFieldIndex];
-        const nextValue = this.testingConfig[field.key] + direction;
-        this.testingConfig[field.key] = Math.max(field.min, Math.min(field.max, nextValue));
-    }
-
     tryHandleTestingSetup() {
+        let handled = false;
+
+        for (const key of this.consumeTestingInputQueue()) {
+            if (/^\d$/.test(key)) {
+                this.appendTestingFieldDigit(key);
+                handled = true;
+            } else if (key === "Backspace") {
+                this.removeTestingFieldDigit();
+                handled = true;
+            }
+        }
+
         if (this.keys.Escape || this.keys.m || this.keys.M) {
             this.keys.Escape = false;
             this.keys.m = false;
             this.keys.M = false;
+            this.commitTestingFieldBuffer();
             this.returnToModeSelect();
             return true;
         }
@@ -948,6 +1069,7 @@ class DodgingGame {
             this.keys.ArrowUp = false;
             this.keys.w = false;
             this.keys.W = false;
+            this.commitTestingFieldBuffer();
             this.testingFieldIndex = (this.testingFieldIndex + this.getTestingFields().length - 1) % this.getTestingFields().length;
             return true;
         }
@@ -956,34 +1078,20 @@ class DodgingGame {
             this.keys.ArrowDown = false;
             this.keys.s = false;
             this.keys.S = false;
+            this.commitTestingFieldBuffer();
             this.testingFieldIndex = (this.testingFieldIndex + 1) % this.getTestingFields().length;
-            return true;
-        }
-
-        if (this.keys.ArrowLeft || this.keys.a || this.keys.A) {
-            this.keys.ArrowLeft = false;
-            this.keys.a = false;
-            this.keys.A = false;
-            this.adjustTestingField(-1);
-            return true;
-        }
-
-        if (this.keys.ArrowRight || this.keys.d || this.keys.D) {
-            this.keys.ArrowRight = false;
-            this.keys.d = false;
-            this.keys.D = false;
-            this.adjustTestingField(1);
             return true;
         }
 
         if (this.keys.Enter || this.keys[" "]) {
             this.keys.Enter = false;
             this.keys[" "] = false;
+            this.commitTestingFieldBuffer();
             this.startTestingRun();
             return true;
         }
 
-        return false;
+        return handled;
     }
 
     update() {
@@ -1532,19 +1640,21 @@ class DodgingGame {
             ctx.fillText("TESTING SETUP", this.canvas.width / 2, 100);
             ctx.font = "21px Arial";
             ctx.fillText("High scores are disabled in Testing mode", this.canvas.width / 2, 145);
-            ctx.fillText("Up/Down: select  |  Left/Right: change  |  Enter: start  |  Esc: back", this.canvas.width / 2, 178);
+            ctx.fillText("Up/Down: select  |  Type numbers: set value  |  Enter: start  |  Esc: back", this.canvas.width / 2, 178);
 
             ctx.font = "24px Arial";
             fields.forEach((field, index) => {
                 const y = 260 + index * 54;
+                const displayValue = this.getTestingFieldDisplayValue(field) + (this.testingFieldBufferKey === field.key ? "|" : "");
                 ctx.fillStyle = index === this.testingFieldIndex ? "#ffe46e" : "white";
-                ctx.fillText(field.label + ": " + this.testingConfig[field.key], this.canvas.width / 2, y);
+                ctx.fillText(field.label + ": " + displayValue, this.canvas.width / 2, y);
             });
 
             ctx.fillStyle = "rgba(255,255,255,0.82)";
             ctx.font = "20px Arial";
             ctx.fillText("Preview Base Speed: " + previewSpeed.toFixed(1), this.canvas.width / 2, 620);
-            ctx.fillText("Deaths restart from the selected level and loadout", this.canvas.width / 2, 655);
+            ctx.fillText("Backspace removes digits from the selected field", this.canvas.width / 2, 655);
+            ctx.fillText("Deaths restart from the selected level and loadout", this.canvas.width / 2, 690);
             ctx.restore();
         } else if (this.shopActive) {
             const timeLeft = Math.max(0, Math.ceil(this.shopTimer / ASSUMED_FPS));
