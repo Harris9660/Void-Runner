@@ -1,13 +1,15 @@
 class Player {
     constructor(progress = {}) {
+        const baseSpeed = progress.baseSpeed ?? 4;
+
         this.x = START_POSITION.x;
         this.y = START_POSITION.y;
         this.size = 15;
         this.maxHp = PLAYER_MAX_HP;
         this.hp = PLAYER_MAX_HP;
         this.hitInvulnerability = 0;
-        this.baseSpeed = progress.baseSpeed ?? 4;
-        this.speed = progress.baseSpeed ?? 4;
+        this.baseSpeed = baseSpeed;
+        this.speed = baseSpeed;
         this.dashCooldown = 0;
         this.shieldTime = 0;
         this.shieldCooldown = 0;

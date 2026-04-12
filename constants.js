@@ -46,4 +46,16 @@ const GAME_MODES = {
     CHECKPOINT: "checkpoint",
     TESTING: "testing"
 };
-const HIGH_SCORE_COOKIE_NAME = "space_traverse_high_score";
+const TESTING_FIELDS = [
+    { key: "startLevel", label: "Start Level", min: 1 },
+    { key: "dashTier", label: "Dash Tier", min: 0 },
+    { key: "shieldTier", label: "Shield Tier", min: 0 },
+    { key: "flareTier", label: "Flare Tier", min: 0 },
+    { key: "speedUps", label: "Speed Ups", min: 0 }
+];
+const SAVE_STATUS_DURATION_FRAMES = 3 * ASSUMED_FPS;
+const API_ENDPOINTS = {
+    BOOTSTRAP: "/api/bootstrap",
+    HIGH_SCORE: "/api/high-score",
+    SAVED_GAME: "/api/saved-game"
+};

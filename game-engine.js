@@ -1,17 +1,25 @@
 class DodgingGame {
-    constructor(canvas) {
+    constructor(canvas, options = {}) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
         this.camera = { x: 0, y: 0, shake: 0 };
         this.keys = {};
         this.mouse = { x: 0, y: 0 };
+        this.persistence = options.persistence ?? null;
+        this.highScore = Number.isFinite(options.highScore) ? options.highScore : 0;
+        this.savedGameSummary = options.savedGameSummary ?? null;
+        this.highScoreSyncPending = null;
+        this.highScoreSyncInFlight = false;
+        this.loadingSavedGame = false;
+        this.savingGame = false;
+        this.saveStatusMessage = "";
+        this.saveStatusTimer = 0;
 
         this.canvas.width = window.innerWidth;
         this.canvas.height = window.innerHeight;
 
         this.bindEvents();
 
-        this.highScore = this.loadHighScore();
         this.selectedGameMode = null;
         this.modeSelectActive = true;
         this.testingSetupActive = false;
@@ -55,28 +63,47 @@ class DodgingGame {
         });
     }
 
-    getCookie(name) {
-        const prefix = name + "=";
-        const parts = document.cookie ? document.cookie.split(";") : [];
+    setSaveStatus(message, duration = SAVE_STATUS_DURATION_FRAMES) {
+        this.saveStatusMessage = message;
+        this.saveStatusTimer = duration;
+    }
 
-        for (const part of parts) {
-            const trimmed = part.trim();
-            if (trimmed.startsWith(prefix)) {
-                return decodeURIComponent(trimmed.slice(prefix.length));
-            }
+    queueHighScoreSync(highScore = this.highScore) {
+        if (!this.persistence) return;
+
+        const nextHighScore = Math.max(this.highScoreSyncPending ?? 0, highScore);
+        if (this.highScoreSyncInFlight) {
+            this.highScoreSyncPending = nextHighScore;
+            return;
         }
 
-        return "";
+        this.persistHighScore(nextHighScore);
     }
 
-    setCookie(name, value, days = 3650) {
-        const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
-        document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
-    }
+    async persistHighScore(highScore) {
+        if (!this.persistence) return;
 
-    loadHighScore() {
-        const savedScore = Number.parseFloat(this.getCookie(HIGH_SCORE_COOKIE_NAME));
-        return Number.isFinite(savedScore) ? savedScore : 0;
+        this.highScoreSyncInFlight = true;
+        this.highScoreSyncPending = null;
+        let shouldFlushPending = true;
+
+        try {
+            const payload = await this.persistence.saveHighScore(highScore);
+            if (Number.isFinite(payload?.highScore)) {
+                this.highScore = Math.max(this.highScore, payload.highScore);
+            }
+        } catch (error) {
+            this.highScoreSyncPending = Math.max(this.highScoreSyncPending ?? 0, highScore);
+            shouldFlushPending = false;
+            console.error("Failed to sync high score.", error);
+        } finally {
+            this.highScoreSyncInFlight = false;
+            if (shouldFlushPending && this.highScoreSyncPending !== null) {
+                const pendingHighScore = this.highScoreSyncPending;
+                this.highScoreSyncPending = null;
+                this.persistHighScore(pendingHighScore);
+            }
+        }
     }
 
     getModeLabel(mode = this.selectedGameMode) {
@@ -106,13 +133,7 @@ class DodgingGame {
     }
 
     getTestingFields() {
-        return [
-            { key: "startLevel", label: "Start Level", min: 1 },
-            { key: "dashTier", label: "Dash Tier", min: 0 },
-            { key: "shieldTier", label: "Shield Tier", min: 0 },
-            { key: "flareTier", label: "Flare Tier", min: 0 },
-            { key: "speedUps", label: "Speed Ups", min: 0 }
-        ];
+        return TESTING_FIELDS;
     }
 
     getTestingField(key) {
@@ -211,18 +232,28 @@ class DodgingGame {
         return this.testingFieldBuffer === "" ? "_" : this.testingFieldBuffer;
     }
 
-    createPlayer(progress = {}) {
-        this.player = new Player(progress);
+    createProjectile(data = {}) {
+        return {
+            trail: [],
+            life: BULLET_LIFETIME,
+            dodgeTriggered: false,
+            ...data
+        };
     }
 
-    resetGame(startLevel = 1, startingScore = 0, playerProgress = {}) {
-        this.createPlayer(playerProgress);
+    addProjectile(data = {}) {
+        const projectile = this.createProjectile(data);
+        this.projectiles.push(projectile);
+        return projectile;
+    }
 
+    clearCombatEntities() {
         this.projectiles = [];
         this.flares = [];
         this.lasers = [];
-        this.boss = null;
-        this.playerHistory = [];
+    }
+
+    resetSpawnTimers() {
         this.straightSpawnTimer = 0;
         this.spiralSpawnTimer = 0;
         this.laserSpawnTimer = 0;
@@ -230,6 +261,177 @@ class DodgingGame {
         this.trackingBarrageSpawnTimer = 0;
         this.laserBarrageSpawnTimer = 0;
         this.predictiveLaserSpawnTimer = 0;
+    }
+
+    clearShieldState() {
+        this.player.shieldTime = 0;
+        this.player.shieldHp = 0;
+    }
+
+    getSpawnTimerState() {
+        return {
+            straightSpawnTimer: this.straightSpawnTimer,
+            spiralSpawnTimer: this.spiralSpawnTimer,
+            laserSpawnTimer: this.laserSpawnTimer,
+            trackingSpawnTimer: this.trackingSpawnTimer,
+            trackingBarrageSpawnTimer: this.trackingBarrageSpawnTimer,
+            laserBarrageSpawnTimer: this.laserBarrageSpawnTimer,
+            predictiveLaserSpawnTimer: this.predictiveLaserSpawnTimer
+        };
+    }
+
+    restoreSpawnTimers(spawnTimers = {}) {
+        this.straightSpawnTimer = spawnTimers.straightSpawnTimer ?? 0;
+        this.spiralSpawnTimer = spawnTimers.spiralSpawnTimer ?? 0;
+        this.laserSpawnTimer = spawnTimers.laserSpawnTimer ?? 0;
+        this.trackingSpawnTimer = spawnTimers.trackingSpawnTimer ?? 0;
+        this.trackingBarrageSpawnTimer = spawnTimers.trackingBarrageSpawnTimer ?? 0;
+        this.laserBarrageSpawnTimer = spawnTimers.laserBarrageSpawnTimer ?? 0;
+        this.predictiveLaserSpawnTimer = spawnTimers.predictiveLaserSpawnTimer ?? 0;
+    }
+
+    createSaveSnapshot() {
+        return {
+            version: 1,
+            selectedGameMode: this.selectedGameMode,
+            currentLevel: this.currentLevel,
+            score: this.score,
+            shopActive: this.shopActive,
+            shopTimer: this.shopTimer,
+            levelFrameCounter: this.levelFrameCounter,
+            levelTransitionTimer: this.levelTransitionTimer,
+            scoreMultiplierTimer: this.scoreMultiplierTimer,
+            checkpointData: this.checkpointData,
+            testingConfig: this.testingConfig,
+            player: { ...this.player },
+            boss: this.boss ? { ...this.boss } : null,
+            projectiles: this.projectiles.map((projectile) => ({
+                ...projectile,
+                trail: projectile.trail.map((trailPoint) => ({ ...trailPoint }))
+            })),
+            flares: this.flares.map((flare) => ({ ...flare })),
+            lasers: this.lasers.map((laser) => ({ ...laser })),
+            playerHistory: this.playerHistory.map((point) => ({ ...point })),
+            camera: { ...this.camera },
+            spawnTimers: this.getSpawnTimerState()
+        };
+    }
+
+    getSavedGameLabel(summary = this.savedGameSummary) {
+        if (!summary) return "";
+
+        const mode = this.getModeLabel(summary.mode);
+        const stage = summary.shopActive ? `Shop Before Level ${summary.resumeLevel}` : `Level ${summary.resumeLevel}`;
+        return `${mode} | ${stage} | Score ${Math.round(summary.score)}`;
+    }
+
+    restoreSavedGame(snapshot) {
+        const playerState = snapshot?.player ?? {};
+        this.player = new Player(playerState);
+        Object.assign(this.player, playerState);
+
+        this.projectiles = Array.isArray(snapshot?.projectiles)
+            ? snapshot.projectiles.map((projectile) => this.createProjectile({
+                ...projectile,
+                trail: Array.isArray(projectile.trail)
+                    ? projectile.trail.map((trailPoint) => ({ ...trailPoint }))
+                    : []
+            }))
+            : [];
+        this.flares = Array.isArray(snapshot?.flares)
+            ? snapshot.flares.map((flare) => ({ ...flare }))
+            : [];
+        this.lasers = Array.isArray(snapshot?.lasers)
+            ? snapshot.lasers.map((laser) => ({ ...laser }))
+            : [];
+        this.playerHistory = Array.isArray(snapshot?.playerHistory)
+            ? snapshot.playerHistory.map((point) => ({ ...point }))
+            : [];
+        this.boss = snapshot?.boss ? { ...snapshot.boss } : null;
+
+        this.selectedGameMode = snapshot?.selectedGameMode ?? GAME_MODES.CLASSIC;
+        this.modeSelectActive = false;
+        this.testingSetupActive = false;
+        this.checkpointData = snapshot?.checkpointData ?? null;
+        this.testingConfig = {
+            ...this.createDefaultTestingConfig(),
+            ...(snapshot?.testingConfig ?? {})
+        };
+        this.testingFieldIndex = 0;
+        this.resetTestingInputState();
+
+        this.currentLevel = Math.max(1, snapshot?.currentLevel ?? 1);
+        this.score = Math.max(0, snapshot?.score ?? 0);
+        this.shopActive = Boolean(snapshot?.shopActive);
+        this.shopTimer = snapshot?.shopTimer ?? SHOP_DURATION_FRAMES;
+        this.levelFrameCounter = snapshot?.levelFrameCounter ?? 0;
+        this.levelTransitionTimer = snapshot?.levelTransitionTimer ?? 0;
+        this.scoreMultiplierTimer = snapshot?.scoreMultiplierTimer ?? 0;
+        this.gameOver = false;
+        this.restoreSpawnTimers(snapshot?.spawnTimers);
+        this.updateAbilityStats();
+
+        this.camera = {
+            x: snapshot?.camera?.x ?? (this.player.x - this.getViewWidth() / 2),
+            y: snapshot?.camera?.y ?? (this.player.y - this.getViewHeight() / 2),
+            shake: 0
+        };
+    }
+
+    async saveCurrentGame() {
+        if (!this.persistence || !this.shopActive || this.savingGame) return false;
+
+        this.savingGame = true;
+        this.setSaveStatus("Saving run...");
+
+        try {
+            const payload = await this.persistence.saveGame(this.createSaveSnapshot());
+            this.savedGameSummary = payload?.savedGameSummary ?? this.savedGameSummary;
+            this.setSaveStatus("Run saved. You can continue it next time.");
+            return true;
+        } catch (error) {
+            console.error("Failed to save the current run.", error);
+            this.setSaveStatus("Save failed. Try again.");
+            return false;
+        } finally {
+            this.savingGame = false;
+        }
+    }
+
+    async continueSavedGame() {
+        if (!this.persistence || this.loadingSavedGame) return false;
+
+        this.loadingSavedGame = true;
+        this.setSaveStatus("Loading saved run...");
+
+        try {
+            const payload = await this.persistence.loadSavedGame();
+            if (!payload?.gameState) {
+                this.savedGameSummary = null;
+                this.setSaveStatus("No saved run was found.");
+                return false;
+            }
+
+            this.savedGameSummary = payload.savedGameSummary ?? null;
+            this.restoreSavedGame(payload.gameState);
+            this.setSaveStatus("Saved run loaded.");
+            return true;
+        } catch (error) {
+            console.error("Failed to load the saved run.", error);
+            this.setSaveStatus("Continue failed. Try again.");
+            return false;
+        } finally {
+            this.loadingSavedGame = false;
+        }
+    }
+
+    resetGame(startLevel = 1, startingScore = 0, playerProgress = {}) {
+        this.player = new Player(playerProgress);
+
+        this.clearCombatEntities();
+        this.boss = null;
+        this.playerHistory = [];
+        this.resetSpawnTimers();
         this.levelFrameCounter = 0;
         this.currentLevel = startLevel;
         this.levelTransitionTimer = LEVEL_TRANSITION_FRAMES;
@@ -377,7 +579,7 @@ class DodgingGame {
         this.score += basePoints * this.getScoreMultiplier();
         if (this.selectedGameMode !== GAME_MODES.TESTING && this.score > this.highScore) {
             this.highScore = this.score;
-            this.setCookie(HIGH_SCORE_COOKIE_NAME, this.highScore.toFixed(2));
+            this.queueHighScoreSync(this.highScore);
         }
     }
 
@@ -414,32 +616,26 @@ class DodgingGame {
         const speed = type === "fast" ? 4 : 2;
         const { vx, vy } = this.aim(x, y, this.player.x, this.player.y, speed);
 
-        this.projectiles.push({
+        this.addProjectile({
             x,
             y,
             vx,
             vy,
             size: type === "fast" ? 8 : 10,
-            type,
-            trail: [],
-            life: BULLET_LIFETIME,
-            dodgeTriggered: false
+            type
         });
     }
 
     spawnRing(cx, cy) {
         for (let i = 0; i < 12; i++) {
             const angle = (Math.PI * 2 / 12) * i;
-            this.projectiles.push({
+            this.addProjectile({
                 x: cx,
                 y: cy,
                 vx: Math.cos(angle) * 2,
                 vy: Math.sin(angle) * 2,
                 size: 10,
-                type: "ring",
-                trail: [],
-                life: BULLET_LIFETIME,
-                dodgeTriggered: false
+                type: "ring"
             });
         }
     }
@@ -447,16 +643,13 @@ class DodgingGame {
     spawnSpiral(cx, cy) {
         for (let i = 0; i < 8; i++) {
             const angle = (Date.now() / 200 + i) % (Math.PI * 2);
-            this.projectiles.push({
+            this.addProjectile({
                 x: cx,
                 y: cy,
                 vx: Math.cos(angle) * 2,
                 vy: Math.sin(angle) * 2,
                 size: 10,
-                type: "spiral",
-                trail: [],
-                life: BULLET_LIFETIME,
-                dodgeTriggered: false
+                type: "spiral"
             });
         }
     }
@@ -473,22 +666,17 @@ class DodgingGame {
     spawnTrackingProjectileWithStats(x, y, stats) {
         const speed = stats.speed;
         const { vx, vy } = this.aim(x, y, this.player.x, this.player.y, speed);
-        const projectile = {
+        const projectile = this.addProjectile({
             x,
             y,
             vx,
             vy,
             size: stats.size,
             type: stats.type,
-            trail: [],
-            life: BULLET_LIFETIME,
             speed,
             turnRate: stats.turnRate,
-            dodgeTriggered: false,
             screenLifeBonusPending: true
-        };
-
-        this.projectiles.push(projectile);
+        });
         return projectile;
     }
 
@@ -670,8 +858,6 @@ class DodgingGame {
                 type: "boss-tracking"
             });
 
-            missile.owner = "boss";
-            missile.bossDamage = 1;
             missile.bossSafeFrames = 42;
         }
     }
@@ -682,17 +868,14 @@ class DodgingGame {
         const count = 12;
         for (let i = 0; i < count; i++) {
             const angle = this.boss.angle + (Math.PI * 2 * i) / count;
-            this.projectiles.push({
+            this.addProjectile({
                 x: this.boss.x,
                 y: this.boss.y,
                 vx: Math.cos(angle) * 2.8,
                 vy: Math.sin(angle) * 2.8,
                 size: 8,
                 type: "boss-burst",
-                trail: [],
                 life: Math.floor(BULLET_LIFETIME * 0.7),
-                dodgeTriggered: false,
-                bossDamage: 1,
                 bossSafeFrames: 24
             });
         }
@@ -726,10 +909,6 @@ class DodgingGame {
                 life: FLARE_LIFE
             });
         }
-    }
-
-    getCurrentLevel() {
-        return this.currentLevel;
     }
 
     getSecondsToNextLevel() {
@@ -816,12 +995,9 @@ class DodgingGame {
         this.shopActive = true;
         this.shopTimer = SHOP_DURATION_FRAMES;
         this.boss = null;
-        this.projectiles = [];
-        this.lasers = [];
-        this.flares = [];
+        this.clearCombatEntities();
         this.scoreMultiplierTimer = 0;
-        this.player.shieldTime = 0;
-        this.player.shieldHp = 0;
+        this.clearShieldState();
     }
 
     beginNextLevel() {
@@ -829,19 +1005,10 @@ class DodgingGame {
         this.currentLevel++;
         this.levelFrameCounter = 0;
         this.levelTransitionTimer = LEVEL_TRANSITION_FRAMES;
-        this.projectiles = [];
-        this.lasers = [];
-        this.flares = [];
+        this.clearCombatEntities();
         this.scoreMultiplierTimer = 0;
-        this.player.shieldTime = 0;
-        this.player.shieldHp = 0;
-        this.straightSpawnTimer = 0;
-        this.spiralSpawnTimer = 0;
-        this.laserSpawnTimer = 0;
-        this.trackingSpawnTimer = 0;
-        this.trackingBarrageSpawnTimer = 0;
-        this.laserBarrageSpawnTimer = 0;
-        this.predictiveLaserSpawnTimer = 0;
+        this.clearShieldState();
+        this.resetSpawnTimers();
         this.syncBossForLevel();
 
         if (this.shouldSaveCheckpoint(this.currentLevel)) {
@@ -901,6 +1068,13 @@ class DodgingGame {
     }
 
     tryHandleShopInput() {
+        if (this.keys.k || this.keys.K) {
+            this.keys.k = false;
+            this.keys.K = false;
+            this.saveCurrentGame();
+            return true;
+        }
+
         const choices = this.player.hp < this.player.maxHp
             ? ["1", "2", "3", "4", "5"]
             : ["1", "2", "3", "4"];
@@ -933,6 +1107,14 @@ class DodgingGame {
         if (this.keys["3"]) {
             this.keys["3"] = false;
             this.openTestingSetup();
+            return true;
+        }
+
+        if ((this.keys["4"] || this.keys.c || this.keys.C) && this.savedGameSummary) {
+            this.keys["4"] = false;
+            this.keys.c = false;
+            this.keys.C = false;
+            this.continueSavedGame();
             return true;
         }
 
@@ -991,7 +1173,15 @@ class DodgingGame {
     }
 
     update() {
+        if (this.saveStatusTimer > 0) {
+            this.saveStatusTimer--;
+            if (this.saveStatusTimer <= 0) {
+                this.saveStatusMessage = "";
+            }
+        }
+
         if (this.modeSelectActive) {
+            if (this.loadingSavedGame) return;
             this.tryHandleModeSelection();
             return;
         }
@@ -1016,6 +1206,7 @@ class DodgingGame {
         if (this.gameOver) return;
 
         if (this.shopActive) {
+            if (this.savingGame) return;
             if (!this.tryHandleShopInput()) {
                 this.shopTimer--;
                 if (this.shopTimer <= 0) this.beginNextLevel();
@@ -1064,7 +1255,7 @@ class DodgingGame {
         if (this.scoreMultiplierTimer > 0) this.scoreMultiplierTimer--;
 
         this.levelFrameCounter++;
-        const level = this.getCurrentLevel();
+        const level = this.currentLevel;
         if (!this.isBossLevel(level) && this.levelFrameCounter >= LEVEL_DURATION_FRAMES) {
             this.beginShopPhase();
             return;
@@ -1466,7 +1657,7 @@ class DodgingGame {
         );
         ctx.fillStyle = "white";
 
-        const level = this.getCurrentLevel();
+        const level = this.currentLevel;
         const bossFightActive = this.isBossLevel(level);
         const secondsToNextLevel = bossFightActive ? null : this.getSecondsToNextLevel();
         ctx.fillText("Mode: " + this.getModeLabel(), 20, 134);
@@ -1519,10 +1710,17 @@ class DodgingGame {
             ctx.fillText("      You restart from the next level after that checkpoint", this.canvas.width / 2, 324);
             ctx.fillText("3. Testing  -  Pick your level and upgrades", this.canvas.width / 2, 374);
             ctx.fillText("      High score is disabled and deaths restart at that setup", this.canvas.width / 2, 408);
+            if (this.savedGameSummary) {
+                ctx.fillText("4. Continue  -  " + this.getSavedGameLabel(), this.canvas.width / 2, 458);
+            }
             ctx.fillStyle = "rgba(255,255,255,0.82)";
             ctx.font = "20px Arial";
-            ctx.fillText("High Score: " + this.highScore.toFixed(0), this.canvas.width / 2, 480);
-            ctx.fillText("Press 1, 2, or 3 to begin", this.canvas.width / 2, 530);
+            ctx.fillText("High Score: " + this.highScore.toFixed(0), this.canvas.width / 2, this.savedGameSummary ? 530 : 480);
+            ctx.fillText(
+                this.savedGameSummary ? "Press 1, 2, 3, or 4 to begin" : "Press 1, 2, or 3 to begin",
+                this.canvas.width / 2,
+                this.savedGameSummary ? 580 : 530
+            );
             ctx.restore();
         } else if (this.testingSetupActive) {
             const fields = this.getTestingFields();
@@ -1612,6 +1810,11 @@ class DodgingGame {
                 this.canvas.width / 2,
                 canBuyHeal ? 488 : 448
             );
+            ctx.fillText(
+                this.savingGame ? "Saving current run..." : "Press K to save this run and continue it later.",
+                this.canvas.width / 2,
+                canBuyHeal ? 518 : 478
+            );
             ctx.restore();
         } else if (!this.gameOver && this.levelTransitionTimer > 0) {
             const progress = this.levelTransitionTimer / LEVEL_TRANSITION_FRAMES;
@@ -1642,6 +1845,15 @@ class DodgingGame {
             ctx.font = "24px Arial";
             ctx.fillText("Press R to restart from " + restartTarget, this.canvas.width / 2, this.canvas.height / 2 + 12);
             ctx.fillText("Press M to return to mode select", this.canvas.width / 2, this.canvas.height / 2 + 48);
+            ctx.restore();
+        }
+
+        if (this.saveStatusMessage) {
+            ctx.save();
+            ctx.textAlign = "right";
+            ctx.fillStyle = "#8ff7b3";
+            ctx.font = "20px Arial";
+            ctx.fillText(this.saveStatusMessage, this.canvas.width - 20, 30);
             ctx.restore();
         }
     }
