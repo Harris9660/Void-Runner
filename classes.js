@@ -43,12 +43,12 @@ class Boss {
 
         this.x = player.x + 260;
         this.y = player.y - 180;
-        this.size = 46 + tier * 4;
+        this.size = Math.max(100, 46 + tier * 4);
         this.hp = maxHp;
         this.maxHp = maxHp;
         this.angle = Math.random() * Math.PI * 2;
-        this.orbitRadius = 240 + tier * 14;
-        this.orbitSpeed = 0.008 + tier * 0.0005;
+        this.orbitRadius = 240 + tier * 2;
+        this.orbitSpeed = 0.008 + tier * 0.0001;
         this.missileCooldown = 90;
         this.burstCooldown = 150;
         this.flashTimer = 0;

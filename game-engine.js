@@ -742,11 +742,11 @@ class DodgingGame {
         const intervals = {
             straight: Math.max(14, 55 - (level - 1) * 4),
             spiral: Math.max(40, 180 - (level - 2) * 14),
-            laser: Math.max(90, 210 - (level - 3) * 12),
+            laser: Math.max(60, 210 - (level - 3) * 12),
             tracking: Math.max(45, 230 - (level - 5) * 14),
             trackingBarrage: Math.max(130, 430 - (level - 10) * 10),
-            laserBarrage: Math.max(200, 520 - (level - 20) * 10),
-            predictiveLaserBurst: Math.max(260, 760 - (level - 30) * 10)
+            laserBarrage: Math.max(120, 520 - (level - 20) * 10),
+            predictiveLaserBurst: Math.max(220, 760 - (level - 30) * 10)
         };
 
         if (this.isBossLevel(level)) {
